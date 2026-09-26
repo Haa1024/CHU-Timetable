@@ -56,8 +56,8 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
-import com.seu.timetable.data.CasAuthClient
-import com.seu.timetable.data.CasLoginResult
+import com.seu.timetable.data.chu.ChuAuthClient
+import com.seu.timetable.data.chu.ChuAuthResult
 import com.seu.timetable.data.CredentialStore
 import com.seu.timetable.data.LoadedBoard
 import com.seu.timetable.data.SessionManager
@@ -99,9 +99,16 @@ import com.seu.timetable.ui.pages.TodayPage
 import com.seu.timetable.ui.theme.LocalSeuColors
 import com.seu.timetable.ui.theme.LocalSeuType
 import com.seu.timetable.ui.theme.SeuRadius
+import com.seu.timetable.ui.theme.Palette
 import com.seu.timetable.ui.theme.SeuTheme
 import com.seu.timetable.ui.theme.ThemeMode
+import com.seu.timetable.ui.theme.paletteOf
+import com.seu.timetable.ui.theme.themeModeOf
+import com.seu.timetable.util.AppIdentity
+import com.seu.timetable.util.AppLinks
 import com.seu.timetable.util.DebugLog
+import com.seu.timetable.util.openInBrowser
+import com.seu.timetable.widget.TodayWidget
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.time.LocalDate
@@ -168,8 +175,15 @@ fun AppRoot() {
     val repo = remember { TimetableRepository(context) }
     val scope = rememberCoroutineScope()
 
-    val themeName by settings.themeMode.collectAsState(initial = ThemeMode.SYSTEM.name)
-    val themeMode = runCatching { ThemeMode.valueOf(themeName) }.getOrDefault(ThemeMode.SYSTEM)
+    // 主题：亮暗与配色两个正交维度，都从设置读。
+    //
+    // 默认值只在 ui.theme 那边定一份（themeModeOf / paletteOf），设置层存的是
+    // "用户选过什么"（没选过就是 null）。两边各写一份默认值迟早会不一致，
+    // 而那种不一致只表现为"颜色不对"，没人会去查设置。
+    val themeName by settings.themeMode.collectAsState(initial = null)
+    val paletteName by settings.themePalette.collectAsState(initial = null)
+    val themeMode = themeModeOf(themeName)
+    val palette = paletteOf(paletteName)
 
     // 凭据状态提到这里：它决定「我的」页那一行怎么写，也决定导入时要不要自动登。
     val autoLogin by credentials.autoLoginEnabled.collectAsState(initial = false)
@@ -201,6 +215,12 @@ fun AppRoot() {
      * （真正的新用户晚几毫秒才看到引导），也不会让老用户每次启动被闪。
      */
     val guideSeen by settings.guideSeen.collectAsState(initial = true)
+
+    /** 首次公告是否看过。初值同样给 true，理由见 [guideSeen] 上面那段。 */
+    val noticeSeen by settings.noticeSeen.collectAsState(initial = true)
+
+    /** 公告正在显示。点掉之后不再出现（标记写进 DataStore，见 [SettingsStore.markNoticeSeen]） */
+    var noticeOpen by remember { mutableStateOf(false) }
 
     /** 校园会话是否有效。null 表示尚未探测。不决定 App 能否使用。 */
     var sessionOk by remember { mutableStateOf<Boolean?>(null) }
@@ -267,8 +287,12 @@ fun AppRoot() {
     //
     // LaunchedEffect 的 key 用 state 与 guideSeen：两者都是异步就绪的
     // （课表要读盘、标记要读 DataStore），谁后到都该能触发，故不能只挂在其中一个上。
-    LaunchedEffect(state, guideSeen) {
-        if (!guideSeen && state is LibraryState.Ready && !guideRunning) {
+    LaunchedEffect(state, guideSeen, noticeSeen) {
+        if (!noticeSeen) {
+            // 公告排在引导之前：它回答"这是什么、从哪来"，而引导假定用户已经
+            // 决定要用这个 App 了。两者都挂在 DataStore 上，故 key 要一起带上。
+            noticeOpen = true
+        } else if (!guideSeen && state is LibraryState.Ready && !guideRunning) {
             guideRunning = true
         }
     }
@@ -293,16 +317,20 @@ fun AppRoot() {
 
     // ---- 启动时静默续期登录态 ----
     //
-    // 续期只需取得 auth 域的 TGT，用 OkHttp 即可完成（见 CasAuthClient），无需打开界面。
-    // 取得 TGT 后，用户下次点"导入课表"时门户那条链会静默发票并建好课表会话。
+    // 走的是和登录页完全相同的那条路（ChuAuthClient），但更快：**先看会话还在不在**，
+    // 在就一个字都不做。日常绝大多数情况都走这个分支，根本不碰密码——
+    // 这也是「存了密码却几乎用不上」的常态。
     //
     // 启动时有意不弹登录页：查看本地课表不需要登录，为"以后可能用得上"的会话
-    // 弹登录页得不偿失。也有意不重试：认证服务端有风控，密码输错即停止（见 LoginActivity）。
+    // 弹登录页得不偿失。也有意不重试：认证侧有风控，连续失败会强制滑块验证码，
+    // 程序过不去（见 LoginActivity 与 ChuLoginBudget）。
     LaunchedEffect(autoLogin, hasSavedPassword, sessionOk) {
         if (!autoLogin || !hasSavedPassword || sessionOk != false) return@LaunchedEffect
+        if (runCatching { repo.hasSession() }.getOrDefault(false)) return@LaunchedEffect
         val creds = credentials.load() ?: return@LaunchedEffect
-        val result = runCatching { CasAuthClient().login(creds.username, creds.password) }
-            .getOrElse { CasLoginResult.Failed(it.message ?: "异常") }
+        val result = runCatching { ChuAuthClient().login(creds.username, creds.password) }
+            .getOrElse { ChuAuthResult.Failed(it.message ?: "异常") }
+        // 只记结果，不改界面：续期失败不该在启动时打断用户，真正需要时会弹登录页
         DebugLog.i("启动续期：${result::class.simpleName}")
     }
 
@@ -335,7 +363,7 @@ fun AppRoot() {
     fun runSync(boardId: String) {
         scope.launch {
             syncBusy = true
-            when (val r = repo.syncFromEhall(boardId)) {
+            when (val r = repo.syncFromServer(boardId)) {
                 is SyncOutcome.Success -> {
                     val name = boardIndex.meta(boardId)?.name ?: "这张课表"
                     refreshBoardList()
@@ -381,7 +409,7 @@ fun AppRoot() {
         runSync(target)
     }
 
-    SeuTheme(themeMode = themeMode) {
+    SeuTheme(themeMode = themeMode, palette = palette) {
         val c = LocalSeuColors.current
         // 下发目标登记处：各页面的 guideTarget 会把它读出来并写入自身矩形。
         // 必须包在最外层，否则各页面读到的是兜底的临时实例，浮层永远拿不到坐标。
@@ -478,6 +506,16 @@ fun AppRoot() {
                         onThemeModeChange = { mode ->
                             scope.launch { settings.setThemeMode(mode.name) }
                         },
+                        themePalette = palette,
+                        onThemePaletteChange = { p ->
+                            scope.launch {
+                                settings.setThemePalette(p.name)
+                                // 小组件由桌面进程渲染，配色也是渲染时才刷进去的，
+                                // 所以改完设置必须**主动喊它重绘**；否则桌面那块会一直停在旧配色上，
+                                // 要等半小时的自然刷新才跟上——看起来就像"设置没生效"。
+                                TodayWidget.refresh(context)
+                            }
+                        },
                         accountSubtitle = when {
                             hasSavedPassword && autoLogin ->
                                 "已保存 ${savedUsername.orEmpty()} · 导入时自动续期"
@@ -542,6 +580,28 @@ fun AppRoot() {
                         guideTargets = guideTargets,
                     )
                 }
+            }
+
+            // ------------------------------------------------------------------
+            // 首次公告
+            //
+            // 同样挂最外层：它出现时用户可能停在任意页面（首次进入时课表库还是空的，
+            // 首屏是空态页），挂在某个页面里就可能不显示。
+            // ------------------------------------------------------------------
+            if (noticeOpen) {
+                MessageDialog(
+                    title = "你好呀 (๑•̀ㅂ•́)و✧",
+                    body = NOTICE_BODY,
+                    confirmText = "开始使用",
+                    actionText = "去 GitHub 点个 ⭐",
+                    onAction = { openInBrowser(context, AppLinks.REPO) },
+                    // 两个按钮都会走到这里（MessageDialog 的既有行为：主按钮先 dismiss
+                    // 再调 onAction），所以"已看过"只在这一处写，不必写两遍。
+                    onDismiss = {
+                        noticeOpen = false
+                        scope.launch { settings.markNoticeSeen() }
+                    },
+                )
             }
 
             // ------------------------------------------------------------------
@@ -657,6 +717,8 @@ private fun MainScaffold(
     scope: kotlinx.coroutines.CoroutineScope,
     themeMode: ThemeMode,
     onThemeModeChange: (ThemeMode) -> Unit,
+    themePalette: Palette,
+    onThemePaletteChange: (Palette) -> Unit,
     accountSubtitle: String,
     /**
      * 校园登录态三态：true 已登录 / false 未登录 / null 正在检查。
@@ -733,7 +795,7 @@ private fun MainScaffold(
     var screen by remember(meta.id) { mutableStateOf<Screen>(Screen.Home) }
 
     val slots = remember(timetable.courses) { CourseColorAssigner(timetable.courses) }
-    // 作息表跟随当前课表：自建课表由用户填写时刻，导入的课表使用默认 SEU 作息。
+    // 作息表跟随当前课表：自建课表由用户填写时刻，导入的课表使用学校默认作息。
     // key 带上 schedule 内容，修改作息后会重算。
     val schedule = remember(meta.id, meta.schedule) { meta.periodSchedule }
 
@@ -802,6 +864,8 @@ private fun MainScaffold(
                     HomeTab.PROFILE -> ProfilePage(
                         themeMode = themeMode,
                         onThemeModeChange = onThemeModeChange,
+                        themePalette = themePalette,
+                        onThemePaletteChange = onThemePaletteChange,
                         accountSubtitle = accountSubtitle,
                         onOpenAccount = { screen = Screen.Account },
                         onOpenHelp = { screen = Screen.Help },
@@ -1078,7 +1142,7 @@ private fun ReminderPage(
     ) { granted ->
         when {
             !granted ->
-                notice = "没有通知权限，提醒发不出来。可在系统设置 → 应用 → SEU 课表 → 通知里开启。"
+                notice = "没有通知权限，提醒发不出来。可在系统设置 → 应用 → ${AppIdentity.DISPLAY_NAME} → 通知里开启。"
             wantTest -> {
                 notice = ""
                 scope.launch { ReminderScheduler.testNotify(context) }
@@ -1373,3 +1437,31 @@ private fun OnResume(block: () -> Unit) {
         }
     }
 }
+
+/**
+ * 首次公告的正文。
+ *
+ * 写成文件级常量而不是内联在 composable 里：后者每次重组都会重新拼一遍，
+ * 而内容一个字都不会变；更要紧的是，将来要改这段话时能一眼找到它。
+ *
+ * 措辞上的三点分寸：
+ *  - **说清来源**。这个 App 与 SEU 课表是同一作者的两个版本（共用课表骨架，
+ *    教务对接各写各的），不写成"改编自某开源项目"——那既不准确，也埋掉了
+ *    "两份都是自己写的"这个事实。
+ *  - **不承诺做不到的事**。只说"课表存在手机里、除导入与检查更新外不联网"；
+ *    写成"绝不联网"的话，用户一看网络权限就知道不对。
+ *  - **求 star 只占最后两行**，不挡在正事前面。
+ */
+private val NOTICE_BODY: String = """
+    CHU 课表 · 长安大学
+
+    这是「SEU 课表」的长安大学版。两个 App 出于同一作者之手：课表网格、桌面小组件、
+    今日页那一整套骨架是共用的，教务对接部分按长安大学的 EAMS 重写。
+
+    · 免费、无广告
+    · 课表存在你自己手机里，除导入与检查更新外不联网
+    · 没有任何统计与上报
+
+    要是它替你省下了一点翻课表的功夫，去仓库点个 ⭐ 吧 (´▽｀)ノ♪
+    那是对作者最大的鼓励。
+""".trimIndent()

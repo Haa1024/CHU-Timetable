@@ -34,7 +34,7 @@ class Timetable(
     fun sessionsOn(week: Int, dayOfWeek: Int): List<CourseSession> =
         sessionsIn(week).filter { it.dayOfWeek == dayOfWeek }.sortedWith(SESSION_ORDER)
 
-    /** 指定日期当天的课。周次走本地推算；要服务端权威值用 EhallClient.weekOf */
+    /** 指定日期当天的课。周次走本地推算，未按学校口径换算。 */
     fun sessionsOnDate(date: LocalDate): List<CourseSession> =
         sessionsOn(term.weekOf(date), date.dayOfWeek.value)
 

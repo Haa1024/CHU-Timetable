@@ -1,5 +1,7 @@
 package com.seu.timetable.ui.pages
 
+import com.seu.timetable.util.AppIdentity
+
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -183,7 +185,7 @@ fun HelpPage(
                     "怎么加",
                     "「我的」→「桌面小组件」→「添加到桌面」，选好尺寸后按桌面的提示操作：" +
                         "多数机型会直接弹「是否添加」的确认框；部分小米机型会把你送到小部件中心，" +
-                        "在那里找到「SEU 课表」拖到桌面上即可。若最后弹出「桌面上还没有加上" +
+                        "在那里找到「${AppIdentity.DISPLAY_NAME}」拖到桌面上即可。若最后弹出「桌面上还没有加上" +
                         "小组件」，说明这台机器的桌面拦住了应用主动添加，按弹层里的步骤手动加。",
                 )
                 HelpDivider()
@@ -202,7 +204,7 @@ fun HelpPage(
                     "realme UI / ColorOS 自 14 版起把桌面上的「卡片」与「插件」合并为卡片中心，" +
                         "第三方应用的小组件统一归入「全部卡片」最底部的「插件」分组，与 App 本身无关。" +
                         "手动添加的完整路径：两指捏合桌面 → 左下角「卡片」→ 切到「全部卡片」" +
-                        "→ 一直滑到最底部点「插件」→ 找到「SEU 课表」。",
+                        "→ 一直滑到最底部点「插件」→ 找到「${AppIdentity.DISPLAY_NAME}」。",
                 )
                 HelpDivider()
                 HelpEntry(

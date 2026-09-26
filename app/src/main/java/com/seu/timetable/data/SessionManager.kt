@@ -1,31 +1,51 @@
 package com.seu.timetable.data
 
-import android.webkit.CookieManager
+import com.seu.timetable.data.chu.ChuAuthClient
+import com.seu.timetable.data.chu.ChuClient
 
 /**
  * 登录态管理。
  *
- * 刻意不保存账号密码：会话完全由 WebView 的 CookieManager 持有，
- * 本类仅负责两项职责——判断会话是否有效、以及清除会话。
+ * ## 会话存在哪
  *
- * 不自行实现 cookie 存储：ehall 会话存在服务端超时，本地存储再稳定亦无法挽回；
- * 且 Android 的 CookieManager 本身即会落盘 cookie（配合 `flush()`）。
- * 因此策略为"用到才发现过期 → 引导重登"，而非"提前缓存"。
+ * **完全由 WebView 的 `CookieManager` 持有**，本类不自行实现 cookie 存储。
+ * 理由：教务那边的会话本来就会服务端超时，本地存得再稳也挽不回；
+ * 而 Android 的 `CookieManager` 本身就会落盘（配合 `flush()`），
+ * 再叠一层只是多一份可能不一致的真相。
+ *
+ * 因此策略是「用到才发现过期 → 引导重登」，而不是「提前缓存」。
+ *
+ * ## 关于账号密码
+ *
+ * 本类**不碰**它们。是否保存、存在哪，一律由 [CredentialStore] 负责
+ * （密码经 Android Keystore 的 AES-256-GCM 加密后落盘，密钥不出硬件）。
  */
 object SessionManager {
 
-    private val client = EhallClient()
+    /**
+     * 只用它来清骨架页缓存——判断登录态走的是真实接口调用，见 [isLoggedIn]。
+     *
+     * 这里再 new 一个 [ChuClient] 是安全的：骨架页缓存是**进程级共享**的
+     * （见 `ChuClient.cachedSkeleton`），所以不存在"两份缓存互相矛盾"的问题。
+     */
+    private val client = ChuClient()
 
     /**
      * 通过一次真实接口调用来判断登录态。
-     * 不依赖"猜测某个 cookie 是否存在"——cookie 名称可变，接口结果更为可靠。
+     *
+     * 不依赖"猜某个 cookie 在不在"——cookie 的名字和有效期都会变，
+     * 而服务端会话过期后 cookie 未必同步消失。
      */
     suspend fun isLoggedIn(): Boolean = client.hasSession()
 
-    /** 退出登录，下次进入时重新弹出 WebView 登录页。 */
+    /**
+     * 退出登录：清掉两个域下的会话 cookie，并把缓存一起作废。
+     *
+     * 缓存**必须**一起清：骨架页那份缓存里含 `ids`，留着它下一次 `isLoggedIn()` 之外的
+     * 路径仍会认为登录着，表现为「退出登录了却还能拉到课表」。
+     */
     fun signOut() {
-        val cm = CookieManager.getInstance()
-        cm.removeAllCookies(null)
-        cm.flush()
+        ChuAuthClient().signOut()
+        client.clearSessionCache()
     }
 }

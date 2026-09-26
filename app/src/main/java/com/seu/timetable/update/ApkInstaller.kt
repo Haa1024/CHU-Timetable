@@ -8,6 +8,7 @@ import android.os.Build
 import android.os.Environment
 import android.provider.Settings
 import androidx.core.content.FileProvider
+import com.seu.timetable.util.AppIdentity
 import com.seu.timetable.util.DebugLog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -29,7 +30,7 @@ object ApkInstaller {
     private const val APK_MIME = "application/vnd.android.package-archive"
 
     /** 下载到公共的 Downloads 目录，用户能在文件管理器里看到、也能自己手动装。 */
-    private const val APK_FILE_NAME = "SEU课表-update.apk"
+    private const val APK_FILE_NAME = AppIdentity.UPDATE_APK_NAME
 
     /**
      * 提交下载任务，返回系统分配的下载 id；提交失败返回 -1。

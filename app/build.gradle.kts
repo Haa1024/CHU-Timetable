@@ -21,16 +21,24 @@ android {
     signingConfigs {
         create("release") {
             storeFile = rootProject.file(
-                keystoreProps.getProperty("RELEASE_STORE_FILE", "keystore/seu-timetable.jks")
+                keystoreProps.getProperty("RELEASE_STORE_FILE", "keystore/chu-timetable.jks")
             )
             storePassword = keystoreProps.getProperty("RELEASE_STORE_PASSWORD")
-            keyAlias = keystoreProps.getProperty("RELEASE_KEY_ALIAS", "seu")
+            keyAlias = keystoreProps.getProperty("RELEASE_KEY_ALIAS", "chu")
             keyPassword = keystoreProps.getProperty("RELEASE_KEY_PASSWORD")
         }
     }
 
     defaultConfig {
-        applicationId = "com.seu.timetable"
+        // 与 SEU 版刻意不同：applicationId 相同即为同一个 App，两个版本无法共存，
+        // 安装会报签名不匹配。换 applicationId 才是"能并存"的充分条件，
+        // 换签名只是必要条件（否则两者互为更新源，可互相覆盖安装）。
+        //
+        // 发布身份是 com.chu.timetable，与下面的 namespace 不一致是**有意为之**：
+        // namespace 决定 R 类包名与源码目录，动它要重排整个源码树；
+        // 它不对外可见，改不改都不影响安装、更新与商店识别。
+        // 将来若要做彻底的包名清理，那是独立的一次重构，不该混在移植里做。
+        applicationId = "com.chu.timetable"
         minSdk = 26          // API 26 起自带 java.time，免去 desugaring
         targetSdk = 35
         versionCode = 3         // 3：新手实操引导 + 切页滑动 + 周次自动校正

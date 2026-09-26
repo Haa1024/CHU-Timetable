@@ -38,13 +38,22 @@ data class BoardMeta(
     val term: TermContext,
 
     /**
-     * 作息时间（13 节的起止时刻）。
+     * 本张课表选定的校区。作息预设随之而定——长安大学两校区第一节课相差 35 分钟，
+     * 选错会让今日页的倒计时与上课提醒整体偏，而课表网格本身看起来毫无异常。
      *
-     * 空 list 表示「使用学校默认作息」（[PeriodTimes.SEU]），而非「没有作息」：学校日后调整
-     * 默认作息（如变更午休）时，未自定义的课表会自动跟随；用户一旦修改即固定为自定义版本。
-     * 用哨兵值而非复制 13 行数据，正是为了保留该性质。
-     * 它仅指学校默认，不表示「所有课表共用一套」——每张课表的作息独立存储，互不影响；
-     * 如需复用可经 [copiedFrom] 复制，复制是一次性取值，完成后两边各自独立。
+     * 存**枚举名**而非枚举本身：这是落盘数据，而 kotlinx 遇到认不出的枚举值会直接抛异常——
+     * 以后改名、或用户装回旧版本都会撞上。用 [PeriodTimes.Campus.byName] 还原，
+     * 认不出就退回默认（与 `SettingsStore` 里 themeMode / themePalette 的做法一致）。
+     */
+    val campus: String = PeriodTimes.Campus.DEFAULT.name,
+
+    /**
+     * 自定义作息（每节的起止时刻）。**空 list 表示「跟随 [campus] 那套预设」**，
+     * 而非「没有作息」——学校日后调整该校区作息（如变更午休）时，未自定义的课表会自动跟上；
+     * 用户一旦修改即固定为自定义版本。用哨兵值而非复制 11 行数据，正是为了保留该性质。
+     *
+     * 它只管这一张课表，不表示「所有课表共用一套」；如需复用可经 [copiedFrom] 复制，
+     * 复制是一次性取值，完成后两边各自独立。
      */
     val schedule: List<PeriodTime> = emptyList(),
 
@@ -71,9 +80,12 @@ data class BoardMeta(
     val updatedAt: Long = 0L,
 ) {
 
-    /** 生效的作息表：没自定义就用默认 */
+    /** 选定校区的枚举值；落盘值认不出时退回默认 */
+    val campusOf: PeriodTimes.Campus get() = PeriodTimes.Campus.byName(campus)
+
+    /** 生效的作息表：没自定义就用**该校区**的预设 */
     val periodSchedule: PeriodSchedule
-        get() = PeriodSchedule(schedule.ifEmpty { PeriodTimes.SEU })
+        get() = PeriodSchedule(schedule.ifEmpty { PeriodTimes.of(campusOf) })
 
     /** 用户是否自己改过作息 */
     val hasCustomSchedule: Boolean get() = schedule.isNotEmpty()
@@ -81,7 +93,7 @@ data class BoardMeta(
     /** 作息来源的可读描述，课表库列表与设置页均使用。 */
     val scheduleLabel: String
         get() = when {
-            !hasCustomSchedule -> "学校默认作息"
+            !hasCustomSchedule -> "${campusOf.label}作息"
             copiedFrom != null -> "自定义作息 · 复制自「$copiedFrom」"
             else -> "自定义作息"
         }

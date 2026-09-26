@@ -21,7 +21,7 @@ object UpdateSources {
 
     /** 仓库归属，改托管时只动这两行。 */
     private const val OWNER = "Haa1024"
-    private const val REPO = "SEU-Timetable"
+    private const val REPO = "CHU-Timetable"
 
     /**
      * 清单地址，按优先级排列，依次降级。
@@ -138,7 +138,7 @@ class UpdateChecker(
 }
 
 /** 请求所用的 UA。GitHub raw 会拒绝无 UA 的请求，带上也顺便避免被当作爬虫。 */
-private const val USER_AGENT = "SEU-Timetable-Android"
+private const val USER_AGENT = "CHU-Timetable-Android"
 
 /**
  * 拉取一个清单地址。

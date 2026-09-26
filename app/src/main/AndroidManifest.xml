@@ -95,8 +95,8 @@
         </activity>
 
         <!--
-          校园登录页。默认显示账号密码表单，门户页在背后隐身运行——
-          ehall 的授权 cookie 只认「从门户点入」的事务，那一步只能交给网页 JS（见 LoginActivity）。
+          校园登录页。默认显示账号密码表单，认证页在背后隐身运行——
+          统一身份认证下发的 cookie 只认「从门户点入」的事务，那一步只能交给网页 JS（见 LoginActivity）。
           密码是否留存由用户在表单上勾选；勾选时经 Android Keystore 加密后落盘。
         -->
         <activity
@@ -174,7 +174,7 @@
           是唯一被允许的做法。
 
           authorities 用 ${applicationId} 拼接，避免硬编码包名——若将来改 applicationId
-          或加产物后缀（如 debug 版 com.seu.timetable.debug），不需要同步改这里，
+          或加产物后缀（如 debug 版 com.chu.timetable.debug），不需要同步改这里，
           ApkInstaller 里也是按 packageName 推出来的，两边自动一致。
         -->
         <provider

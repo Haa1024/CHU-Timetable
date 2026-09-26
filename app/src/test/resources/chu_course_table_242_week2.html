@@ -1,0 +1,845 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" dir="ltr">
+<head>
+  <title></title>
+  <meta http-equiv="content-type" content="text/html;charset=utf-8" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge"/>
+  <meta http-equiv="pragma" content="no-cache"/>
+  <meta http-equiv="cache-control" content="no-cache"/>
+  <meta http-equiv="expires" content="0"/>
+  <meta http-equiv="content-style-type" content="text/css"/>
+  <meta http-equiv="content-script-type" content="text/javascript"/>
+  <script>
+      window.$BG_LANG='zh';
+  </script>
+  <script type="text/javascript" src="/eams/static/scripts/jquery/jquery,jquery.ui.core.js?bg=3.4.3"></script>
+  <script type="text/javascript" src="/eams/static/scripts/plugins/jquery-form,jquery-history,jquery-colorbox,jquery-chosen.js?bg=3.4.3"></script>
+  <script type="text/javascript" src="/eams/static/js/plugins/jquery.subscribe,/js/struts2/jquery.struts2,jquery.ui.struts2.js?bg=3.4.3"></script>
+  <script type="text/javascript" src="/eams/static/scripts/beangle/beangle,beangle-ui.js?bg=3.4.3"></script>
+  <script type="text/javascript">var App = {contextPath:"/eams"};jQuery(document).ready(function () {jQuery.struts2_jquery.version="3.6.1";beangle.contextPath=App.contextPath;jQuery.scriptPath = App.contextPath+"/static/";jQuery.struts2_jquerySuffix = "";jQuery.ajaxSettings.traditional = true;jQuery.ajaxSetup ({cache: false});});</script>
+  <script type="text/javascript" src="/eams/static/scripts/my97/WdatePicker-4.72.js?compress=no"></script>
+  <link id="jquery_theme_link" rel="stylesheet" href="/eams/static/themes/smoothness/jquery-ui.css?s2j=3.6.1" type="text/css"/>
+  <link id="beangle_theme_link" href="/eams/static/themes/default/beangle-ui,colorbox,chosen.css" rel="stylesheet" type="text/css" />
+  <link rel="stylesheet" href="/eams/static/css/foundation.css" type="text/css"/>
+  <script type="text/javascript" src="/eams/static/scripts/highcharts.js" ></script>
+
+	<script src="/eams/static/scripts/require.config.js?v=3"></script>
+	<script>
+	require.baseUrl="/eams/static/scripts";
+	</script>
+	<script src="/eams/static/scripts/require.js"></script>
+	<script type="text/javascript" src="/eams/static/scripts/require.js"></script>
+	
+	<!-- backbone & underscore -- fontend MVC framework -->
+	<script type="text/javascript" src="/eams/static/scripts/underscore.min.js"></script>
+	<script type="text/javascript" src="/eams/static/scripts/backbone.min.js"></script>
+	<script type="text/javascript" src="/eams/static/scripts/underscore.string.min.js"></script>
+	<script>
+	require(['underscore.string'], function(_s) {
+	        _.str = _s;
+	        _.mixin(_.str.exports());
+	});
+	</script>
+	
+
+</head>
+<body>
+
+ 
+<script language="JavaScript" type="text/JavaScript" src="/eams/static/scripts/course/TaskActivity.js?v3.21"></script>
+<script language="JavaScript">
+	function fillTable(table,weeks,units,tableIndex){
+   	   for(var i=0;i<weeks;i++){
+	 	    for(var j=0;j<units-1;j++){
+	 	        var index =units*i+j;
+	 	        var preTd=jQuery("#TD"+index+"_"+tableIndex);
+	 	        var nextTd=jQuery("#TD"+(index+1)+"_"+tableIndex);
+	 	        while(table.marshalContents[index]!=null&&table.marshalContents[index+1]!=null&&table.marshalContents[index]==table.marshalContents[index+1]){
+	 	            nextTd.remove();
+	 	            var spanNumber = 1;
+	 	            if(preTd.prop("rowSpan")) spanNumber = new Number(preTd.prop("rowSpan"))
+	 	            spanNumber++;
+	 	            preTd.prop("rowSpan",spanNumber);
+	 	            j++;
+	 	            if(j>=units-1){
+	 	                break;
+	 	            }
+	 	            index=index+1;
+	 	            nextTd=jQuery("#TD"+(index+1)+"_"+tableIndex);
+	 	        }
+	 	    }
+ 	    }
+ 	    
+ 	   		for(var k = 0; k < table.unitCounts; k++){
+			var td=document.getElementById("TD" + k + "_" + tableIndex);
+			if(td != null && table.marshalContents[k] != null) { 
+				td.innerHTML = table.marshalContents[k];
+				td.style.backgroundColor="#94aef3";
+				td.className = "infoTitle";
+				
+				// 查找冲突 table.activities是什么，可以查看TaskActivity.js和courseTableContent_script.ftl
+				var activitiesInCell = table.activities[k];
+				if(detectCollisionInCell(activitiesInCell)) {
+					td.style.backgroundColor="red";
+				}
+				td.className="infoTitle";
+				td.title=table.marshalContents[k].replace(/<br>/g,";");
+			}
+		}
+   	}
+function detectCollisionInCell(activitiesInCell) {
+	if(activitiesInCell.length <=1)
+		return false;
+	//单元格的课程集合[courseId(seqNo)->true]
+	var cellCourseIds=new Object();
+	var mergedValidWeeks = activitiesInCell[0].vaildWeeks.split("");
+	//登记第一个课程
+	cellCourseIds[ activitiesInCell[0].courseName]=true;
+	for(var z = 1; z < activitiesInCell.length; z++) {		
+		var detectCollision = false;
+		var tValidWeeks = activitiesInCell[z].vaildWeeks.split("");
+		if(mergedValidWeeks.length != tValidWeeks.length) {
+			alert('mergedValidWeeks.length != tValidWeeks.length');
+			return;
+		}
+		for(var x = 0; x < mergedValidWeeks.length; x++) {	//53代表53周
+			var m = new Number(mergedValidWeeks[x]);
+			var t = new Number(tValidWeeks[x]);
+			if(m + t <= 1) {
+				mergedValidWeeks[x] = m + t;
+			}
+			else {
+				//如果已经是登记过的，则不算冲突
+			    if(!cellCourseIds[activitiesInCell[z].courseName]){
+  					return true;	//发现冲突
+  				}
+  			}
+  		}
+  		//登记该课程
+  		cellCourseIds[activitiesInCell[z].courseName]=true;
+	}
+	return false;
+}
+</script>
+   		<pre>课表格式说明：教师姓名 课程名称(序号) (第n周-第m周,教室)</pre>
+		<table width="100%" id="manualArrangeCourseTable" align="center" class="gridtable"  style="text-align:center">
+			<thead>
+			<tr>
+		    	<th style="background-color:#DEEDF7;" height="10px" width="80px">节次/周次</td>
+		    	<th style="background-color:#DEEDF7;">
+		        	<font size="2px">星期一</font>
+				</th>
+		    	<th style="background-color:#DEEDF7;">
+		        	<font size="2px">星期二</font>
+				</th>
+		    	<th style="background-color:#DEEDF7;">
+		        	<font size="2px">星期三</font>
+				</th>
+		    	<th style="background-color:#DEEDF7;">
+		        	<font size="2px">星期四</font>
+				</th>
+		    	<th style="background-color:#DEEDF7;">
+		        	<font size="2px">星期五</font>
+				</th>
+		    	<th style="background-color:#DEEDF7;">
+		        	<font size="2px">星期六</font>
+				</th>
+		    	<th style="background-color:#DEEDF7;">
+		        	<font size="2px">星期日</font>
+				</th>
+			</tr>
+			</thead>
+			<tr>
+			    <td style="background-color:yellow">
+		    		<font size="2px"> 1</font>
+				</td>
+		   		<td id="TD0_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD11_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD22_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD33_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD44_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD55_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD66_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+			</tr>
+			<tr>
+			    <td style="background-color:yellow">
+		    		<font size="2px"> 2</font>
+				</td>
+		   		<td id="TD1_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD12_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD23_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD34_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD45_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD56_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD67_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+			</tr>
+			<tr>
+			    <td style="background-color:yellow">
+		    		<font size="2px"> 3</font>
+				</td>
+		   		<td id="TD2_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD13_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD24_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD35_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD46_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD57_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD68_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+			</tr>
+			<tr>
+			    <td style="background-color:yellow">
+		    		<font size="2px"> 4</font>
+				</td>
+		   		<td id="TD3_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD14_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD25_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD36_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD47_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD58_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD69_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+			</tr>
+			<tr>
+			    <td style="background-color:green">
+		    		<font size="2px"> 5</font>
+				</td>
+		   		<td id="TD4_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD15_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD26_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD37_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD48_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD59_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD70_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+			</tr>
+			<tr>
+			    <td style="background-color:green">
+		    		<font size="2px"> 6</font>
+				</td>
+		   		<td id="TD5_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD16_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD27_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD38_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD49_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD60_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD71_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+			</tr>
+			<tr>
+			    <td style="background-color:green">
+		    		<font size="2px"> 7</font>
+				</td>
+		   		<td id="TD6_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD17_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD28_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD39_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD50_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD61_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD72_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+			</tr>
+			<tr>
+			    <td style="background-color:green">
+		    		<font size="2px"> 8</font>
+				</td>
+		   		<td id="TD7_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD18_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD29_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD40_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD51_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD62_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD73_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+			</tr>
+			<tr>
+			    <td style="background-color:pink">
+		    		<font size="2px"> 9</font>
+				</td>
+		   		<td id="TD8_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD19_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD30_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD41_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD52_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD63_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD74_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+			</tr>
+			<tr>
+			    <td style="background-color:pink">
+		    		<font size="2px"> 10</font>
+				</td>
+		   		<td id="TD9_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD20_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD31_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD42_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD53_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD64_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD75_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+			</tr>
+			<tr>
+			    <td style="background-color:pink">
+		    		<font size="2px"> 11</font>
+				</td>
+		   		<td id="TD10_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD21_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD32_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD43_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD54_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD65_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+		   		<td id="TD76_0"  style="backGround-Color:#ffffff;font-size:12px"></td>
+			</tr>
+		</table> 
+				<input type="hidden" name="practiceContent.14TH1104.01" value="[17, 18, 19, 20, 21, 22]" />
+				<input type="hidden" name="practiceContent.64TZ5002.29" value="[17, 18, 19, 20, 21, 22]" />
+				<input type="hidden" name="practiceContent.12XK1110.37" value="[17, 18, 19, 20, 21, 22]" />
+				<input type="hidden" name="practiceContent.12XK2202.03" value="[17, 18, 19, 20, 21, 22]" />
+				<input type="hidden" name="practiceContent.12XK1305.01" value="[17, 18, 19, 20, 21, 22]" />
+				<input type="hidden" name="practiceContent.16SZ1005.J8" value="[17, 18, 19, 20, 21, 22]" />
+				<input type="hidden" name="practiceContent.16SZ6004.69" value="[17, 18, 19, 20, 21, 22]" />
+				<input type="hidden" name="practiceContent.26XK1454.01" value="[17, 18, 19, 20, 21, 22]" />
+				<input type="hidden" name="practiceContent.26SJ5453.01" value="[17, 18, 19, 20, 21, 22]" />
+				<input type="hidden" name="practiceContent.29XK1603.01" value="[17, 18, 19, 20, 21, 22]" />
+				<input type="hidden" name="practiceContent.29XK1604.01" value="[17, 18, 19, 20, 21, 22]" />
+				<input type="hidden" name="practiceContent.29ZY1602.01" value="[17, 18, 19, 20, 21, 22]" />
+				<input type="hidden" name="practiceContent.29SJ5602.01" value="[17, 18, 19, 20, 21, 22]" />
+				<input type="hidden" name="practiceContent.13TH1022.15" value="[17, 18, 19, 20, 21, 22]" />
+<script language="JavaScript">
+	// function CourseTable in TaskActivity.js
+	var language = "zh";           
+	var table0 = new CourseTable(2026,77);
+	var unitCount = 11;
+	var index=0;
+	var activity=null;
+		var teachers = [{id:2341,name:"孙东永",lab:false},{id:8325,name:"兰甜",lab:false}];
+		var actTeachers = [{id:2341,name:"孙东永",lab:false},{id:8325,name:"兰甜",lab:false}];
+		var assistant = _.filter(actTeachers, function(actTeacher) {
+			return (_.where(teachers, {id:actTeacher.id,name:actTeacher.name,lab:actTeacher.lab}).length == 0) && (actTeacher.lab == true);
+		});
+		var assistantName = "";
+		if (assistant.length > 0) {
+			assistantName = assistant[0].name;
+			actTeachers = _.reject(actTeachers, function(actTeacher) {
+				return _.where(assistant, {id:actTeacher.id}).length > 0;
+			});
+		}
+		var actTeacherId = [];
+		var actTeacherName = [];
+		for (var i = 0; i < actTeachers.length; i++) {
+			actTeacherId.push(actTeachers[i].id);
+			actTeacherName.push(actTeachers[i].name);
+		}
+		
+		var courseName = "水文学原理(29XK1603.01)";
+		
+			activity = new TaskActivity(actTeacherId.join(','),actTeacherName.join(','),"56845(29XK1603.01)",courseName,"29XK1603.01","269","*WX2305","01111111100000000000000000000000000000000000000000000",null,"",assistantName,"");
+			index =3*unitCount+2;
+			table0.activities[index][table0.activities[index].length]=activity;
+			index =3*unitCount+3;
+			table0.activities[index][table0.activities[index].length]=activity;
+		var teachers = [{id:2341,name:"孙东永",lab:false},{id:8325,name:"兰甜",lab:false}];
+		var actTeachers = [{id:2341,name:"孙东永",lab:false},{id:8325,name:"兰甜",lab:false}];
+		var assistant = _.filter(actTeachers, function(actTeacher) {
+			return (_.where(teachers, {id:actTeacher.id,name:actTeacher.name,lab:actTeacher.lab}).length == 0) && (actTeacher.lab == true);
+		});
+		var assistantName = "";
+		if (assistant.length > 0) {
+			assistantName = assistant[0].name;
+			actTeachers = _.reject(actTeachers, function(actTeacher) {
+				return _.where(assistant, {id:actTeacher.id}).length > 0;
+			});
+		}
+		var actTeacherId = [];
+		var actTeacherName = [];
+		for (var i = 0; i < actTeachers.length; i++) {
+			actTeacherId.push(actTeachers[i].id);
+			actTeacherName.push(actTeachers[i].name);
+		}
+		
+		var courseName = "水文学原理(29XK1603.01)";
+		
+			activity = new TaskActivity(actTeacherId.join(','),actTeacherName.join(','),"56845(29XK1603.01)",courseName,"29XK1603.01","269","*WX2305","01111111100000000000000000000000000000000000000000000",null,"",assistantName,"");
+			index =1*unitCount+0;
+			table0.activities[index][table0.activities[index].length]=activity;
+			index =1*unitCount+1;
+			table0.activities[index][table0.activities[index].length]=activity;
+		var teachers = [{id:2341,name:"孙东永",lab:false},{id:8325,name:"兰甜",lab:false}];
+		var actTeachers = [{id:2341,name:"孙东永",lab:false},{id:8325,name:"兰甜",lab:false}];
+		var assistant = _.filter(actTeachers, function(actTeacher) {
+			return (_.where(teachers, {id:actTeacher.id,name:actTeacher.name,lab:actTeacher.lab}).length == 0) && (actTeacher.lab == true);
+		});
+		var assistantName = "";
+		if (assistant.length > 0) {
+			assistantName = assistant[0].name;
+			actTeachers = _.reject(actTeachers, function(actTeacher) {
+				return _.where(assistant, {id:actTeacher.id}).length > 0;
+			});
+		}
+		var actTeacherId = [];
+		var actTeacherName = [];
+		for (var i = 0; i < actTeachers.length; i++) {
+			actTeacherId.push(actTeachers[i].id);
+			actTeacherName.push(actTeachers[i].name);
+		}
+		
+		var courseName = "水文学原理(29XK1603.01)";
+		
+			activity = new TaskActivity(actTeacherId.join(','),actTeacherName.join(','),"56845(29XK1603.01)",courseName,"29XK1603.01","269","*WX2305","01111111100000000000000000000000000000000000000000000",null,"",assistantName,"");
+			index =0*unitCount+0;
+			table0.activities[index][table0.activities[index].length]=activity;
+			index =0*unitCount+1;
+			table0.activities[index][table0.activities[index].length]=activity;
+		var teachers = [{id:3120,name:"邹维宝",lab:false}];
+		var actTeachers = [{id:3120,name:"邹维宝",lab:false}];
+		var assistant = _.filter(actTeachers, function(actTeacher) {
+			return (_.where(teachers, {id:actTeacher.id,name:actTeacher.name,lab:actTeacher.lab}).length == 0) && (actTeacher.lab == true);
+		});
+		var assistantName = "";
+		if (assistant.length > 0) {
+			assistantName = assistant[0].name;
+			actTeachers = _.reject(actTeachers, function(actTeacher) {
+				return _.where(assistant, {id:actTeacher.id}).length > 0;
+			});
+		}
+		var actTeacherId = [];
+		var actTeacherName = [];
+		for (var i = 0; i < actTeachers.length; i++) {
+			actTeacherId.push(actTeachers[i].id);
+			actTeacherName.push(actTeachers[i].name);
+		}
+		
+		var courseName = "工程测量(26XK1454.01)";
+		
+			activity = new TaskActivity(actTeacherId.join(','),actTeacherName.join(','),"54021(26XK1454.01)",courseName,"26XK1454.01","3","*WH2311","01111111111000000000000000000000000000000000000000000",null,"",assistantName,"");
+			index =2*unitCount+4;
+			table0.activities[index][table0.activities[index].length]=activity;
+			index =2*unitCount+5;
+			table0.activities[index][table0.activities[index].length]=activity;
+		var teachers = [{id:2247,name:"蒋誉",lab:false}];
+		var actTeachers = [{id:2247,name:"蒋誉",lab:false}];
+		var assistant = _.filter(actTeachers, function(actTeacher) {
+			return (_.where(teachers, {id:actTeacher.id,name:actTeacher.name,lab:actTeacher.lab}).length == 0) && (actTeacher.lab == true);
+		});
+		var assistantName = "";
+		if (assistant.length > 0) {
+			assistantName = assistant[0].name;
+			actTeachers = _.reject(actTeachers, function(actTeacher) {
+				return _.where(assistant, {id:actTeacher.id}).length > 0;
+			});
+		}
+		var actTeacherId = [];
+		var actTeacherName = [];
+		for (var i = 0; i < actTeachers.length; i++) {
+			actTeacherId.push(actTeachers[i].id);
+			actTeacherName.push(actTeachers[i].name);
+		}
+		
+		var courseName = "气排球选项（体育四）(1405420X.05)";
+		
+			activity = new TaskActivity(actTeacherId.join(','),actTeacherName.join(','),"47272(1405420X.05)",courseName,"1405420X.05","1099","西区气排球场","00111111111111111111000000000000000000000000000000000",null,"",assistantName,"");
+			index =3*unitCount+6;
+			table0.activities[index][table0.activities[index].length]=activity;
+			index =3*unitCount+7;
+			table0.activities[index][table0.activities[index].length]=activity;
+		var teachers = [{id:2748,name:"刘茜",lab:false}];
+		var actTeachers = [{id:2748,name:"刘茜",lab:false}];
+		var assistant = _.filter(actTeachers, function(actTeacher) {
+			return (_.where(teachers, {id:actTeacher.id,name:actTeacher.name,lab:actTeacher.lab}).length == 0) && (actTeacher.lab == true);
+		});
+		var assistantName = "";
+		if (assistant.length > 0) {
+			assistantName = assistant[0].name;
+			actTeachers = _.reject(actTeachers, function(actTeacher) {
+				return _.where(assistant, {id:actTeacher.id}).length > 0;
+			});
+		}
+		var actTeacherId = [];
+		var actTeacherName = [];
+		for (var i = 0; i < actTeachers.length; i++) {
+			actTeacherId.push(actTeachers[i].id);
+			actTeacherName.push(actTeachers[i].name);
+		}
+		
+		var courseName = "跨文化交际(13TH1022.15)";
+		
+			activity = new TaskActivity(actTeacherId.join(','),actTeacherName.join(','),"52675(13TH1022.15)",courseName,"13TH1022.15","250","*WX2103","01111111110000000000000000000000000000000000000000000",null,"",assistantName,"");
+			index =4*unitCount+0;
+			table0.activities[index][table0.activities[index].length]=activity;
+			index =4*unitCount+1;
+			table0.activities[index][table0.activities[index].length]=activity;
+		var teachers = [{id:2748,name:"刘茜",lab:false}];
+		var actTeachers = [{id:2748,name:"刘茜",lab:false}];
+		var assistant = _.filter(actTeachers, function(actTeacher) {
+			return (_.where(teachers, {id:actTeacher.id,name:actTeacher.name,lab:actTeacher.lab}).length == 0) && (actTeacher.lab == true);
+		});
+		var assistantName = "";
+		if (assistant.length > 0) {
+			assistantName = assistant[0].name;
+			actTeachers = _.reject(actTeachers, function(actTeacher) {
+				return _.where(assistant, {id:actTeacher.id}).length > 0;
+			});
+		}
+		var actTeacherId = [];
+		var actTeacherName = [];
+		for (var i = 0; i < actTeachers.length; i++) {
+			actTeacherId.push(actTeachers[i].id);
+			actTeacherName.push(actTeachers[i].name);
+		}
+		
+		var courseName = "跨文化交际(13TH1022.15)";
+		
+			activity = new TaskActivity(actTeacherId.join(','),actTeacherName.join(','),"52675(13TH1022.15)",courseName,"13TH1022.15","250","*WX2103","01111111110000000000000000000000000000000000000000000",null,"",assistantName,"");
+			index =1*unitCount+6;
+			table0.activities[index][table0.activities[index].length]=activity;
+			index =1*unitCount+7;
+			table0.activities[index][table0.activities[index].length]=activity;
+		var teachers = [{id:8995,name:"张美莎",lab:false}];
+		var actTeachers = [{id:8995,name:"张美莎",lab:false}];
+		var assistant = _.filter(actTeachers, function(actTeacher) {
+			return (_.where(teachers, {id:actTeacher.id,name:actTeacher.name,lab:actTeacher.lab}).length == 0) && (actTeacher.lab == true);
+		});
+		var assistantName = "";
+		if (assistant.length > 0) {
+			assistantName = assistant[0].name;
+			actTeachers = _.reject(actTeachers, function(actTeacher) {
+				return _.where(assistant, {id:actTeacher.id}).length > 0;
+			});
+		}
+		var actTeacherId = [];
+		var actTeacherName = [];
+		for (var i = 0; i < actTeachers.length; i++) {
+			actTeacherId.push(actTeachers[i].id);
+			actTeacherName.push(actTeachers[i].name);
+		}
+		
+		var courseName = "习近平新时代中国特色社会主义思想概论(16SZ1005.J8)";
+		
+			activity = new TaskActivity(actTeacherId.join(','),actTeacherName.join(','),"51727(16SZ1005.J8)",courseName,"16SZ1005.J8","591","*WM3403","01111111111111111000000000000000000000000000000000000",null,"",assistantName,"");
+			index =4*unitCount+4;
+			table0.activities[index][table0.activities[index].length]=activity;
+			index =4*unitCount+5;
+			table0.activities[index][table0.activities[index].length]=activity;
+		var teachers = [{id:4223,name:"张博",lab:false}];
+		var actTeachers = [{id:4223,name:"张博",lab:false}];
+		var assistant = _.filter(actTeachers, function(actTeacher) {
+			return (_.where(teachers, {id:actTeacher.id,name:actTeacher.name,lab:actTeacher.lab}).length == 0) && (actTeacher.lab == true);
+		});
+		var assistantName = "";
+		if (assistant.length > 0) {
+			assistantName = assistant[0].name;
+			actTeachers = _.reject(actTeachers, function(actTeacher) {
+				return _.where(assistant, {id:actTeacher.id}).length > 0;
+			});
+		}
+		var actTeacherId = [];
+		var actTeacherName = [];
+		for (var i = 0; i < actTeachers.length; i++) {
+			actTeacherId.push(actTeachers[i].id);
+			actTeacherName.push(actTeachers[i].name);
+		}
+		
+		var courseName = "工程力学(12XK1305.01)";
+		
+			activity = new TaskActivity(actTeacherId.join(','),actTeacherName.join(','),"52603(12XK1305.01)",courseName,"12XK1305.01","573","*WM2201","01111111111101100000000000000000000000000000000000000",null,"",assistantName,"");
+			index =2*unitCount+2;
+			table0.activities[index][table0.activities[index].length]=activity;
+			index =2*unitCount+3;
+			table0.activities[index][table0.activities[index].length]=activity;
+		var teachers = [{id:4223,name:"张博",lab:false}];
+		var actTeachers = [{id:4223,name:"张博",lab:false}];
+		var assistant = _.filter(actTeachers, function(actTeacher) {
+			return (_.where(teachers, {id:actTeacher.id,name:actTeacher.name,lab:actTeacher.lab}).length == 0) && (actTeacher.lab == true);
+		});
+		var assistantName = "";
+		if (assistant.length > 0) {
+			assistantName = assistant[0].name;
+			actTeachers = _.reject(actTeachers, function(actTeacher) {
+				return _.where(assistant, {id:actTeacher.id}).length > 0;
+			});
+		}
+		var actTeacherId = [];
+		var actTeacherName = [];
+		for (var i = 0; i < actTeachers.length; i++) {
+			actTeacherId.push(actTeachers[i].id);
+			actTeacherName.push(actTeachers[i].name);
+		}
+		
+		var courseName = "工程力学(12XK1305.01)";
+		
+			activity = new TaskActivity(actTeacherId.join(','),actTeacherName.join(','),"52603(12XK1305.01)",courseName,"12XK1305.01","607","*WM3201","01111111111111100000000000000000000000000000000000000",null,"",assistantName,"");
+			index =0*unitCount+2;
+			table0.activities[index][table0.activities[index].length]=activity;
+			index =0*unitCount+3;
+			table0.activities[index][table0.activities[index].length]=activity;
+		var teachers = [{id:1469,name:"吴华",lab:false}];
+		var actTeachers = [{id:1469,name:"吴华",lab:false}];
+		var assistant = _.filter(actTeachers, function(actTeacher) {
+			return (_.where(teachers, {id:actTeacher.id,name:actTeacher.name,lab:actTeacher.lab}).length == 0) && (actTeacher.lab == true);
+		});
+		var assistantName = "";
+		if (assistant.length > 0) {
+			assistantName = assistant[0].name;
+			actTeachers = _.reject(actTeachers, function(actTeacher) {
+				return _.where(assistant, {id:actTeacher.id}).length > 0;
+			});
+		}
+		var actTeacherId = [];
+		var actTeacherName = [];
+		for (var i = 0; i < actTeachers.length; i++) {
+			actTeacherId.push(actTeachers[i].id);
+			actTeacherName.push(actTeachers[i].name);
+		}
+		
+		var courseName = "概率论与数理统计Ⅰ(12XK1110.37)";
+		
+			activity = new TaskActivity(actTeacherId.join(','),actTeacherName.join(','),"52583(12XK1110.37)",courseName,"12XK1110.37","177","*WM1201","01111111111110000000000000000000000000000000000000000",null,"",assistantName,"");
+			index =3*unitCount+4;
+			table0.activities[index][table0.activities[index].length]=activity;
+			index =3*unitCount+5;
+			table0.activities[index][table0.activities[index].length]=activity;
+		var teachers = [{id:1469,name:"吴华",lab:false}];
+		var actTeachers = [{id:1469,name:"吴华",lab:false}];
+		var assistant = _.filter(actTeachers, function(actTeacher) {
+			return (_.where(teachers, {id:actTeacher.id,name:actTeacher.name,lab:actTeacher.lab}).length == 0) && (actTeacher.lab == true);
+		});
+		var assistantName = "";
+		if (assistant.length > 0) {
+			assistantName = assistant[0].name;
+			actTeachers = _.reject(actTeachers, function(actTeacher) {
+				return _.where(assistant, {id:actTeacher.id}).length > 0;
+			});
+		}
+		var actTeacherId = [];
+		var actTeacherName = [];
+		for (var i = 0; i < actTeachers.length; i++) {
+			actTeacherId.push(actTeachers[i].id);
+			actTeacherName.push(actTeachers[i].name);
+		}
+		
+		var courseName = "概率论与数理统计Ⅰ(12XK1110.37)";
+		
+			activity = new TaskActivity(actTeacherId.join(','),actTeacherName.join(','),"52583(12XK1110.37)",courseName,"12XK1110.37","177","*WM1201","01111111111110000000000000000000000000000000000000000",null,"",assistantName,"");
+			index =0*unitCount+4;
+			table0.activities[index][table0.activities[index].length]=activity;
+			index =0*unitCount+5;
+			table0.activities[index][table0.activities[index].length]=activity;
+		var teachers = [];
+		var actTeachers = [];
+		var assistant = _.filter(actTeachers, function(actTeacher) {
+			return (_.where(teachers, {id:actTeacher.id,name:actTeacher.name,lab:actTeacher.lab}).length == 0) && (actTeacher.lab == true);
+		});
+		var assistantName = "";
+		if (assistant.length > 0) {
+			assistantName = assistant[0].name;
+			actTeachers = _.reject(actTeachers, function(actTeacher) {
+				return _.where(assistant, {id:actTeacher.id}).length > 0;
+			});
+		}
+		var actTeacherId = [];
+		var actTeacherName = [];
+		for (var i = 0; i < actTeachers.length; i++) {
+			actTeacherId.push(actTeachers[i].id);
+			actTeacherName.push(actTeachers[i].name);
+		}
+		
+		var courseName = "体育（四）(14TH1104.01)";
+		
+			activity = new TaskActivity(actTeacherId.join(','),actTeacherName.join(','),"51645(14TH1104.01)",courseName,"14TH1104.01","331","操场2","01111111111111111000000000000000000000000000000000000",null,"",assistantName,"");
+			index =3*unitCount+6;
+			table0.activities[index][table0.activities[index].length]=activity;
+			index =3*unitCount+7;
+			table0.activities[index][table0.activities[index].length]=activity;
+	table0.marshalTable(2,2,2);
+	fillTable(table0,7,11,0);
+</script>
+   		    <br>
+ 
+<strong>课程列表:</strong>
+<div class="grid">
+
+
+<table id="grid12042826911" class="gridtable">
+<thead class="gridhead">
+
+
+<tr>
+<th  width="10%" >序号</th>
+<th  width="10%" >课程序号</th>
+<th  width="15%" >课程代码</th>
+<th  width="15%" >课程名称</th>
+<th  width="10%" >课程类别</th>
+<th  width="10%" >学分</th>
+<th  width="10%" >修读类别</th>
+<th  width="10%" >修读类别细分</th>
+<th  width="10%" >起始周</th>
+<th  width="15%" >教师</th>
+<th  width="15%" >备注</th>
+<th  width="10%" >操作</th>
+</tr>
+
+</thead>
+
+<tbody id="grid12042826911_data"><tr>		<td>1</td>
+<td>		<a href="/eams/courseTableForStd!taskTable.action?lesson.id=395043" onclick="return bg.Go(this,null)" title="点击显示单个教学任务具体安排">12XK1110.37</a>
+</td><td>12XK1110</td><td>概率论与数理统计Ⅰ</td><td>		 学科基础课程（2022）
+</td><td>3</td><td>				正常
+</td><td></td>		<td>1-12</td>
+<td>吴华</td><td>      			
+      			<br/>
+      			
+</td><td>			<a href="/eams/courseTableForStd!teachPlanInfo.action?lesson.id=395043" target="_blank">授课计划</a>
+			<a href="/eams/courseTableForStd!courseSummaryInfo.action?lesson.id=395043" target="_blank">课程小节</a>
+</td></tr><tr>		<td>2</td>
+<td>		<a href="/eams/courseTableForStd!taskTable.action?lesson.id=395616" onclick="return bg.Go(this,null)" title="点击显示单个教学任务具体安排">12XK1305.01</a>
+</td><td>12XK1305</td><td>工程力学</td><td>		 学科基础课程（2022）
+</td><td>3</td><td>				正常
+</td><td></td>		<td>1-14</td>
+<td>张博</td><td>      			
+      			<br/>
+      			
+      			<br/>
+      			
+</td><td>			<a href="/eams/courseTableForStd!teachPlanInfo.action?lesson.id=395616" target="_blank">授课计划</a>
+			<a href="/eams/courseTableForStd!courseSummaryInfo.action?lesson.id=395616" target="_blank">课程小节</a>
+</td></tr><tr>		<td>3</td>
+<td>		<a href="/eams/courseTableForStd!taskTable.action?lesson.id=395307" onclick="return bg.Go(this,null)" title="点击显示单个教学任务具体安排">12XK2202.03</a>
+</td><td>12XK2202</td><td>物理实验I</td><td>		 学科基础课程（2022）
+</td><td>2.5</td><td>				正常
+</td><td></td>		<td>1-15</td>
+<td>丁健</td><td></td><td>			<a href="/eams/courseTableForStd!teachPlanInfo.action?lesson.id=395307" target="_blank">授课计划</a>
+			<a href="/eams/courseTableForStd!courseSummaryInfo.action?lesson.id=395307" target="_blank">课程小节</a>
+</td></tr><tr>		<td>4</td>
+<td>		<a href="/eams/courseTableForStd!taskTable.action?lesson.id=404764" onclick="return bg.Go(this,null)" title="点击显示单个教学任务具体安排">13TH1022.15</a>
+</td><td>13TH1022</td><td>跨文化交际</td><td>		 外语类发展课程群（2022）
+</td><td>2</td><td>				正常
+</td><td></td>		<td>1-9</td>
+<td>刘茜</td><td>      			
+      			<br/>
+      			
+</td><td>			<a href="/eams/courseTableForStd!teachPlanInfo.action?lesson.id=404764" target="_blank">授课计划</a>
+			<a href="/eams/courseTableForStd!courseSummaryInfo.action?lesson.id=404764" target="_blank">课程小节</a>
+</td></tr><tr>		<td>5</td>
+<td>		<a href="/eams/courseTableForStd!taskTable.action?lesson.id=405929" onclick="return bg.Go(this,null)" title="点击显示单个教学任务具体安排">1405420X.05</a>
+</td><td>1405420X</td><td>气排球选项（体育四）</td><td>		 通识教育课程
+</td><td>1</td><td>				正常
+</td><td></td>		<td>2-19</td>
+<td>蒋誉</td><td>      			
+</td><td>			<a href="/eams/courseTableForStd!teachPlanInfo.action?lesson.id=405929" target="_blank">授课计划</a>
+			<a href="/eams/courseTableForStd!courseSummaryInfo.action?lesson.id=405929" target="_blank">课程小节</a>
+</td></tr><tr>		<td>6</td>
+<td>		<a href="/eams/courseTableForStd!taskTable.action?lesson.id=394208" onclick="return bg.Go(this,null)" title="点击显示单个教学任务具体安排">14TH1104.01</a>
+</td><td>14TH1104</td><td>体育（四）</td><td>		 体育（2022）
+</td><td>1</td><td>				正常
+</td><td></td>		<td>1-16</td>
+<td></td><td>      			
+</td><td>			<a href="/eams/courseTableForStd!teachPlanInfo.action?lesson.id=394208" target="_blank">授课计划</a>
+			<a href="/eams/courseTableForStd!courseSummaryInfo.action?lesson.id=394208" target="_blank">课程小节</a>
+</td></tr><tr>		<td>7</td>
+<td>		<a href="/eams/courseTableForStd!taskTable.action?lesson.id=396761" onclick="return bg.Go(this,null)" title="点击显示单个教学任务具体安排">16SZ1005.J8</a>
+</td><td>16SZ1005</td><td>习近平新时代中国特色社会主义思想概论</td><td>		 思想政治理论课程（2022）
+</td><td>3</td><td>				正常
+</td><td></td>		<td>1-16</td>
+<td>张美莎</td><td>      			
+      			<br/>
+      			
+</td><td>			<a href="/eams/courseTableForStd!teachPlanInfo.action?lesson.id=396761" target="_blank">授课计划</a>
+			<a href="/eams/courseTableForStd!courseSummaryInfo.action?lesson.id=396761" target="_blank">课程小节</a>
+</td></tr><tr>		<td>8</td>
+<td>		<a href="/eams/courseTableForStd!taskTable.action?lesson.id=397601" onclick="return bg.Go(this,null)" title="点击显示单个教学任务具体安排">16SZ6004.69</a>
+</td><td>16SZ6004</td><td>形势与政策（四）</td><td>		 思想政治理论课程（2022）
+</td><td>0.25</td><td>				正常
+</td><td></td>		<td>1-2</td>
+<td>伊力夏提·奥斯曼</td><td></td><td>			<a href="/eams/courseTableForStd!teachPlanInfo.action?lesson.id=397601" target="_blank">授课计划</a>
+			<a href="/eams/courseTableForStd!courseSummaryInfo.action?lesson.id=397601" target="_blank">课程小节</a>
+</td></tr><tr>		<td>9</td>
+<td>		<a href="/eams/courseTableForStd!taskTable.action?lesson.id=399158" onclick="return bg.Go(this,null)" title="点击显示单个教学任务具体安排">26SJ5453.01</a>
+</td><td>26SJ5453</td><td>工程测量实习</td><td>		 实习实践课程（2022）
+</td><td>1</td><td>				正常
+</td><td></td>		<td>17</td>
+<td>邹维宝</td><td></td><td>			<a href="/eams/courseTableForStd!teachPlanInfo.action?lesson.id=399158" target="_blank">授课计划</a>
+			<a href="/eams/courseTableForStd!courseSummaryInfo.action?lesson.id=399158" target="_blank">课程小节</a>
+</td></tr><tr>		<td>10</td>
+<td>		<a href="/eams/courseTableForStd!taskTable.action?lesson.id=398715" onclick="return bg.Go(this,null)" title="点击显示单个教学任务具体安排">26XK1454.01</a>
+</td><td>26XK1454</td><td>工程测量</td><td>		 学科基础课程（2022）
+</td><td>2.5</td><td>				正常
+</td><td></td>		<td>1-10</td>
+<td>邹维宝</td><td>      			
+      			<br/>
+      			
+      			<br/>
+      			
+</td><td>			<a href="/eams/courseTableForStd!teachPlanInfo.action?lesson.id=398715" target="_blank">授课计划</a>
+			<a href="/eams/courseTableForStd!courseSummaryInfo.action?lesson.id=398715" target="_blank">课程小节</a>
+</td></tr><tr>		<td>11</td>
+<td>		<a href="/eams/courseTableForStd!taskTable.action?lesson.id=403774" onclick="return bg.Go(this,null)" title="点击显示单个教学任务具体安排">29SJ5602.01</a>
+</td><td>29SJ5602</td><td>水利专业地质实习</td><td>		 实习实践课程（2022）
+</td><td>4</td><td>				正常
+</td><td></td>		<td>18-20双,21-22</td>
+<td>吕继强,王菊翠,胡安焱,刘燕,史文海,卢玉东</td><td></td><td>			<a href="/eams/courseTableForStd!teachPlanInfo.action?lesson.id=403774" target="_blank">授课计划</a>
+			<a href="/eams/courseTableForStd!courseSummaryInfo.action?lesson.id=403774" target="_blank">课程小节</a>
+</td></tr><tr>		<td>12</td>
+<td>		<a href="/eams/courseTableForStd!taskTable.action?lesson.id=403768" onclick="return bg.Go(this,null)" title="点击显示单个教学任务具体安排">29XK1603.01</a>
+</td><td>29XK1603</td><td>水文学原理</td><td>		 学科基础课程（2022）
+</td><td>3</td><td>				正常
+</td><td></td>		<td>1-8</td>
+<td>孙东永,兰甜</td><td>      			
+      			<br/>
+      			
+      			<br/>
+      			
+</td><td>			<a href="/eams/courseTableForStd!teachPlanInfo.action?lesson.id=403768" target="_blank">授课计划</a>
+			<a href="/eams/courseTableForStd!courseSummaryInfo.action?lesson.id=403768" target="_blank">课程小节</a>
+</td></tr><tr>		<td>13</td>
+<td>		<a href="/eams/courseTableForStd!taskTable.action?lesson.id=403770" onclick="return bg.Go(this,null)" title="点击显示单个教学任务具体安排">29XK1604.01</a>
+</td><td>29XK1604</td><td>水文地质学基础</td><td>		 学科基础课程（2022）
+</td><td>2.5</td><td>				正常
+</td><td></td>		<td>5-14</td>
+<td>卢玉东</td><td>      			
+      			<br/>
+      			
+      			<br/>
+      			
+      			<br/>
+      			
+      			<br/>
+      			
+      			<br/>
+      			
+</td><td>			<a href="/eams/courseTableForStd!teachPlanInfo.action?lesson.id=403770" target="_blank">授课计划</a>
+			<a href="/eams/courseTableForStd!courseSummaryInfo.action?lesson.id=403770" target="_blank">课程小节</a>
+</td></tr><tr>		<td>14</td>
+<td>		<a href="/eams/courseTableForStd!taskTable.action?lesson.id=403772" onclick="return bg.Go(this,null)" title="点击显示单个教学任务具体安排">29ZY1602.01</a>
+</td><td>29ZY1602</td><td>水资源系统分析</td><td>		 专业方向课程（2022）
+</td><td>2</td><td>				正常
+</td><td></td>		<td>9-16</td>
+<td>胡安焱</td><td>      			
+      			<br/>
+      			
+</td><td>			<a href="/eams/courseTableForStd!teachPlanInfo.action?lesson.id=403772" target="_blank">授课计划</a>
+			<a href="/eams/courseTableForStd!courseSummaryInfo.action?lesson.id=403772" target="_blank">课程小节</a>
+</td></tr><tr>		<td>15</td>
+<td>		<a href="/eams/courseTableForStd!taskTable.action?lesson.id=394432" onclick="return bg.Go(this,null)" title="点击显示单个教学任务具体安排">64TZ5002.29</a>
+</td><td>64TZ5002</td><td>德育实践（二）</td><td>		 素质拓展实践课程（2022）
+</td><td>0.25</td><td>				正常
+</td><td></td>		<td>1-18</td>
+<td>谈震</td><td></td><td>			<a href="/eams/courseTableForStd!teachPlanInfo.action?lesson.id=394432" target="_blank">授课计划</a>
+			<a href="/eams/courseTableForStd!courseSummaryInfo.action?lesson.id=394432" target="_blank">课程小节</a>
+</td></tr></tbody>
+</table>
+</div>
+<script type="text/javascript">
+  var clearCheckbox_grid12042826911 = function() {
+    jQuery("#grid12042826911").find(".box:checkbox").removeProp("checked");
+    jQuery("#grid12042826911").find(".gridselect-top :checkbox").removeProp("checked");
+    return true;
+  }
+  
+  page_grid12042826911 = bg.page("/eams/courseTableForStd!courseTable.action","");
+  {
+    var _paramstring = 'ignoreHead=1&setting.kind=std&startWeek=2&semester.id=242&ids=197506';
+    var _params = _paramstring.split('&');
+    for (var i = 0; i < _params.length; i++) {
+      _params[i] = decodeURIComponent(_params[i]);
+    }
+    _paramstring = _params.join('&');
+    page_grid12042826911.target("",'grid12042826911').action("/eams/courseTableForStd!courseTable.action").addParams(_paramstring).orderBy("null");
+  }
+  bg.ui.grid.init('grid12042826911',page_grid12042826911);
+</script>
+   		<br>
+   		    
+   		<br>
+</body>
+</html>

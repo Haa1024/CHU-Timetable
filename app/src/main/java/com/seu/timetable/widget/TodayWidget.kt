@@ -15,6 +15,7 @@ import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.toArgb
 import com.seu.timetable.MainActivity
 import com.seu.timetable.R
+import com.seu.timetable.data.SettingsStore
 import com.seu.timetable.data.TimetableLibrary
 import com.seu.timetable.domain.CourseColorAssigner
 import com.seu.timetable.domain.CourseSession
@@ -23,10 +24,13 @@ import com.seu.timetable.domain.SessionStatus
 import com.seu.timetable.domain.Timetable
 import com.seu.timetable.domain.seuDayOfWeek
 import com.seu.timetable.ui.theme.CourseBarPalette
+import com.seu.timetable.ui.theme.colorsOf
+import com.seu.timetable.ui.theme.paletteOf
 import com.seu.timetable.util.DebugLog
 import com.seu.timetable.util.PlayfulTalk
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import java.time.LocalDate
 import java.time.LocalTime
@@ -181,7 +185,21 @@ abstract class BaseTodayWidget : AppWidgetProvider() {
         val shown = remaining.take(rowCapacity(manager, id))
         val assigner = CourseColorAssigner(content.courses)
         val dark = isNight(context)
-        val ongoingBg = context.getColor(R.color.widget_ongoing_bg)
+
+        // ★ 主题色必须在这里刷进去，不能靠 `@color/widget_*` 资源。
+        //
+        // 资源是编译期常量，而 `values/colors_widget.xml` 里写死的 `widget_primary` 与
+        // `widget_ongoing_bg` **正是默认那套配色**——用户在「我的 → 外观」里换了配色，
+        // 桌面这块纹丝不动，看起来就像设置没生效。
+        //
+        // 只刷这两处、其余不动，是有理由的：
+        //  - 文字与分隔线的取值在两套配色里**本来就相同**（都是中性的灰阶），覆盖了也是白覆盖；
+        //    `widget_root` 的背景是个 drawable，`setBackgroundColor` 会把圆角一起刷掉，
+        //    得不偿失——而两套配色的底色差异肉眼不可辨。
+        //  - 课程色条与课名颜色刻意**不跟主题**：它们表达"哪门课"，跨主题保持一致才有意义。
+        val skin = colorsOf(paletteOf(SettingsStore(context).themePalette.first()), dark)
+        views.setTextColor(R.id.widget_weekday, skin.primary.toArgb())
+        val ongoingBg = skin.primarySoft.toArgb()
 
         for (i in 0 until MAX_ROWS) {
             val visible = i < shown.size

@@ -1,7 +1,7 @@
 {
   "versionCode": 3,
   "versionName": "1.2.0",
-  "apkUrl": "https://github.com/Haa1024/SEU-Timetable/releases/download/v1.2.0/SEU-Timetable-v1.2.0.apk",
-  "notes": "新增新手引导，并补上几处早就该有的操作手感。\n\n• 新增新手引导：首次进入时，会在真实界面上逐步高亮各个功能的位置，并配文字说明；想重看可在「我的 → 新手指引」里打开\n• 课表页支持左右滑动切换周次\n• 课表表头的星期下方显示当天日期，翻周时自动跟随\n• 切回 App 时，周次会自动校正到「今天所在的周」\n• 切换底部页面时加入横向滑动过渡",
+  "apkUrl": "https://github.com/Haa1024/CHU-Timetable/releases/latest/download/CHU-Timetable-release.apk",
+  "notes": "首个长安大学版本。\n\n• 对接长安大学教务系统（EAMS）：后台自动完成登录，导入课表不必打开网页\n• 作息内置南校区（本部）与渭水校区两套预设，可按所在校区选择，也能逐节自定义\n• 开学日期由你填写一次（教务不提供学期起止日期），按学期记住并自动沿用\n• 学期候选直接取教务返回的真实列表，不会出现「选了却查不到」\n• 桌面小组件「今日课程」，配色跟随设置\n• 两套配色主题：长大蓝（默认）与东大绿",
   "mandatory": false
 }

@@ -5,7 +5,7 @@
   为什么需要它：登录页（LoginActivity）在正式包里是 `exported="false"`（正确做法，
   别人不能随便拉起它）。但调试时想单独跑一遍登录流程，就得能直接启动它：
 
-      adb shell am start -n com.seu.timetable/.ui.LoginActivity
+      adb shell am start -n com.chu.timetable/.ui.LoginActivity
 
   而 `exported="false"` 时 adb shell（uid 2000）会被系统拒绝
   （实测报 `SecurityException: ... not exported from uid ...`，即使应用是 debuggable）。

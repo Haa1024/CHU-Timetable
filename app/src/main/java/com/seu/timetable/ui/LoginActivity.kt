@@ -1,19 +1,11 @@
-/* 注意：Kotlin 块注释可嵌套，注释中若出现「斜杠加星号」会提前闭合注释。涉及 `/jwapp/sys/wdkb/` 后接星号与 `default` 的路径，注释内写作 `<星号>default`，代码字符串字面量保持原样。 */
-
 package com.seu.timetable.ui
 
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
-import android.net.Uri
 import android.os.Bundle
-import android.os.Message
 import android.webkit.CookieManager
-import android.webkit.ConsoleMessage
 import android.webkit.WebChromeClient
-import android.webkit.WebResourceError
-import android.webkit.WebResourceRequest
-import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -55,17 +47,16 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.lifecycleScope
-import com.seu.timetable.data.AUTH_BASE
-import com.seu.timetable.data.CasAuthClient
-import com.seu.timetable.data.CasLoginResult
 import com.seu.timetable.data.CredentialStore
 import com.seu.timetable.data.Credentials
-import com.seu.timetable.data.EHALL_APP
-import com.seu.timetable.data.EHALL_BASE
-import com.seu.timetable.data.EhallClient
-import com.seu.timetable.data.GatewayAuthClient
-import com.seu.timetable.data.GatewayLoginResult
+import com.seu.timetable.data.NotLoggedInException
 import com.seu.timetable.data.SessionProbe
+import com.seu.timetable.data.SettingsStore
+import com.seu.timetable.data.chu.CHU_EAMS_BASE
+import com.seu.timetable.data.chu.CHU_UA
+import com.seu.timetable.data.chu.ChuAuthClient
+import com.seu.timetable.data.chu.ChuAuthResult
+import com.seu.timetable.data.chu.ChuClient
 import com.seu.timetable.ui.components.AccountField
 import com.seu.timetable.ui.components.BackIcon
 import com.seu.timetable.ui.components.FieldLabel
@@ -76,212 +67,88 @@ import com.seu.timetable.ui.components.SeuToggle
 import com.seu.timetable.ui.theme.LocalSeuColors
 import com.seu.timetable.ui.theme.LocalSeuType
 import com.seu.timetable.ui.theme.SeuTheme
+import com.seu.timetable.ui.theme.paletteOf
+import com.seu.timetable.ui.theme.themeModeOf
 import com.seu.timetable.util.DebugLog
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
-/**
- * 登录页 = 账号密码表单 + 一层隐身的门户页（后者仅作兜底）。
- *
- * 界面：默认只给表单（学号 + 密码 + 是否保存），用户不必看见学校的网页。
- * 后台：拿到 TGT（见 [CasAuthClient]）后先试**纯 HTTP** 走完网关与课表会话
- * （见 [establishSession] 与 [GatewayAuthClient]）；只有这条路不通时才退回
- * 「隐身 WebView 走门户 → 点击我的课表」（见 [watchSession]）。
- *
- * ## 为什么曾经不能删 WebView，现在可以退居兜底
- *
- * 学校 2024-11 把 SSLVPN 换成了 Sangfor aTrust 零信任网关，`ehall.seu.edu.cn`
- * 整个域都在网关之后：未持网关会话时，任何路径（根、深链、`/login?service=`、接口）
- * 都被 302 到 `vpn.seu.edu.cn/.../verify`，再落到一个**必须跑 JS 的门户 SPA**。
- * 旧版因此认定「门户那一步只能交给网页 JS」。
- *
- * 但实测发现：网关自己就带 CAS SSO，入口由 `/passport/v1/public/authConfig` 下发
- * （`firstAuth: ["/passport/v1/public/casLogin?sfDomain=CAS-auth"]`），
- * 且这条链全是普通 302，不依赖页面 JS。于是「过网关」这件事可以纯 HTTP 完成——
- * WebView 从「必经之路」降级为「验证码与协议变动时的兜底」。
- *
- * 网页只在两种情况下露出：学校要求验证码（只能人工过），或用户主动点「改用网页登录」。
- *
- * 入口用 `index.html`：首页为壳页面，内容位于 `<iframe id="template-container">`，该 iframe 高 100%
- * 而在 WebView 中高度链断裂致整页白屏，加载后由 [fitPortalFrame] 撑满视口。
- */
-const val LOGIN_ENTRY_URL = "https://i.seu.edu.cn/index.html"
-
-/** 自动打开的目标：课表微应用。使用不带 gid_ 的朴素地址即可（实测 gid_ 与鉴权无关）。 */
-private const val EHALL_APP_URL = "$EHALL_BASE$EHALL_APP/*default/index.do?EMAP_LANG=zh&THEME="
-
-/** 课表微应用在 URL 上的特征串。WebView 走到含该串的地址即表示用户已点开课表，此时探测才有意义。 */
-private const val WDKB_MARK = "wdkb"
-
-/** 诊断用接口真实地址。须用其查询 cookie 才能取得接口实际携带的批次（见 [refreshDiagnostics]）；
- * 不得用域名根查询：`getCookie()` 遵循 path 匹配，而 GS_SESSIONID 的 path 为 `/jwapp/`，根路径返回空会误导排查。 */
-private const val EHALL_API_PROBE = "$EHALL_BASE$EHALL_APP/modules/jshkcb/dqxnxq.do"
-
-/**
- * 清理 ehall 侧 cookie 时覆盖的候选路径。
- * `CookieManager` 无「按域删除」API，只能对具体 URL 以 `setCookie(url, "名=; Path=…; Max-Age=0")` 覆盖，
- * 且（域, 路径）须与原 cookie 完全一致，否则静默失败。
- * 坑：若不写 `Path=`，WebView 按 URL 推导默认路径（取末斜杠前部分），`…/jwapp/` 推得 `/jwapp`（无尾斜杠），
- * 而服务端 GS_SESSIONID 路径为 `/jwapp/`（有尾斜杠），二者不等导致覆盖不到。故须显式写 `Path=`，且带与不带尾斜杠都试。
- */
-private val EHALL_COOKIE_PATH_CANDIDATES: List<String> = run {
-    val out = mutableListOf("/")
-    var acc = ""
-    // EHALL_APP 形如 /jwapp/sys/wdkb，逐段展开成各级路径
-    EHALL_APP.trim('/').split('/').forEach { seg ->
-        acc += "/$seg"
-        out += acc
-        out += "$acc/"
-    }
-    out += "$acc/*default"
-    out += "$acc/modules/jshkcb"
-    out.distinct()
-}
-
+/** 承载登录界面三态：等用户动手 / 正在验证 / 完成。 */
 private enum class LoginPhase { WAITING, CHECKING, DONE }
 
 /**
  * 登录页当前呈现哪一种界面。
  *
- * FORM 为默认：只给账号密码表单，门户页在背后隐身运行。
- * WEB 是兜底：学校要求验证码、或用户主动点「改用网页登录」时才露出网页——
- * 验证码这一步只能人工在网页里完成。
+ * [FORM] 是默认：只给账号密码表单，安静地把事办完。
+ * [WEB] 是兜底：学校这次要验证码、或用户主动点「改用网页登录」时才露出网页——
+ * 滑块验证码这一步只能人工在网页里完成，程序过不去。
  */
 private enum class LoginStage { FORM, WEB }
 
+private const val WAITING_HINT = "首次导入课表需要登录一次；此后查看、编辑、切换课表都不再需要联网。"
+private const val AUTO_HINT = "正在用已保存的账号自动登录…"
+private const val FORM_HINT = "填入学号与统一身份认证密码即可。登录只用于从教务导入课表。"
+private const val WEB_HINT = "请在下方网页里完成登录。登录成功后会自动返回，也可以点右上角「已完成」。"
+private const val WEB_ENTRY = "$CHU_EAMS_BASE/eams/"
+
+/** 网页模式下轮询会话是否建立：每次间隔、以及总次数。 */
+private const val WATCH_INTERVAL_MS = 1_500L
+private const val WATCH_ROUNDS = 80
+
 /**
- * 校园账号登录页。
+ * 长安大学统一身份认证登录页。
  *
- * 两种进入方式：`auto=false` 只显示表单等用户填；`auto=true` 时若本地已存凭据，
- * 先替你静默试一次（见 [autoLogin]），成不成都退回表单——失败原因会写在表单下方。
- * 无论走哪条路，门户链都由同一个 [watchSession] 完成，区别只是 TGT 从哪来。
+ * ## 两条路，同一份会话
  *
- * 凭据见 [CredentialStore]：密码经 Android Keystore 的 AES-256-GCM 加密后落盘，密钥不出硬件；
- * 是否保存由用户在表单上勾选，不勾则本次用完即忘。
- * 登录成功判定不依赖猜测 cookie 名或页面返回，而是直接探测一次接口；时机为走到课表页后，
- * 由后台轮询（[watchSession]）与网页模式下的手动确认共同触发。全过程日志 tag 为 `SeuTT`。
+ * - **后台自动**（默认）：账号密码经 [ChuAuthClient] 走完 CAS，全程不见网页。
+ * - **网页兜底**：学校要验证码、或用户主动点「改用网页登录」时，露出
+ *   `bkjw.chd.edu.cn` 的登录页让人自己操作。
+ *
+ * 两条路共享同一份 cookie（都经 `WebViewCookieJar` 接 `CookieManager`），
+ * 所以能互为兜底：后台登成功了网页打开就是登录态，用户在网页登过了后台也认得。
+ *
+ * ## 成功判据只有一条
+ *
+ * **真实业务接口能读到课表**（[probeOnce]）。不猜 cookie 名、不看页面返回，
+ * 甚至不轻信 CAS 那一步拿到的票——票拿到了而业务域会话没建起来，是确实会发生的情况
+ * （例如 `service` 串与注册值对不上）。
+ *
+ * ## 关于"别把账号当调试器"
+ *
+ * 本页**从不自动重试**。学校的认证侧有风控：连续失败若干次就强制滑块验证码，
+ * 程序完全过不去，且计数归零之前用户自己也登不上。所以失败一律如实报告、
+ * 把决定权交回用户——这条纪律的具体执行在 [ChuLoginBudget]，本页只负责不绕过它。
  */
 class LoginActivity : ComponentActivity() {
 
-    private val client by lazy { EhallClient() }
-
-    /** 认证接口客户端。自动模式之外用不到，故延迟初始化。 */
-    private val casAuth by lazy { CasAuthClient() }
-
-    /**
-     * 零信任网关的纯 HTTP 登录。**先试它、失败再退 WebView**（见 [establishSession]）。
-     * 学校自 2024-11 把 SSLVPN 换成了 Sangfor aTrust，ehall 整个域都在网关后面；
-     * 但网关自带 CAS SSO，那条链全是普通 302，不必跑页面 JS。
-     */
-    private val gatewayAuth by lazy { GatewayAuthClient() }
-
-    /** 凭据存储。手动输入密码的路径不会用到。 */
+    private val client by lazy { ChuClient() }
+    private val auth by lazy { ChuAuthClient() }
     private val credentials by lazy { CredentialStore(this) }
 
-    /**
-     * 本次会话可用来「自助过 CAS」的凭据。
-     *
-     * 三条来源，优先级从高到低：
-     *  ① 用户刚在表单里填的（[submitLogin] 当场赋值）——最可信，一定没过期；
-     *  ② 本地已存的——[autoLogin] 与 [fallbackToDirect] 用；
-     *  ③ 都没有则为 null，此时纯 HTTP 链一遇到「无 TGT」就会如实退回 WebView，
-     *    而不是拿着空密码去敲 CAS 把账号往风控上撞。
-     *
-     * 只在内存里存，不落盘：落盘已由 [CredentialStore] 按用户意愿负责。
-     */
-    @Volatile
-    private var sessionCredentials: Credentials? = null
+    private val settings by lazy { SettingsStore(this) }
 
-    /** 是否「能自动则自动」。由调用方决定（设置页关闭自动登录则传 false）。 */
+    /** 是否「能自动则自动」。由调用方决定（用户在「我的」页关掉自动登录则传 false）。 */
     private var autoMode = false
 
     private val phase = mutableStateOf(LoginPhase.WAITING)
     private val hint = mutableStateOf(WAITING_HINT)
-    private val pageInfo = mutableStateOf("正在打开网上办事大厅…")
-    private val cookieInfo = mutableStateOf("")
+    private val pageInfo = mutableStateOf("未打开网页")
     private val probeInfo = mutableStateOf("尚未探测")
 
-    // ---- 表单界面状态 ----
-
-    /** 默认表单；验证码或用户主动改用网页时切到 WEB。 */
+    /** 默认表单；要验证码或用户主动改用网页时切到 [LoginStage.WEB]。 */
     private val stage = mutableStateOf(LoginStage.FORM)
 
-    /** 表单下方的那行错误提示，空串表示不显示。 */
+    /** 表单下方那行错误提示，空串表示不显示。 */
     private val formError = mutableStateOf("")
 
-    /** 后台轮询是否已在跑，保证只启动一次（见 [startWatch]）。 */
+    /** 网页模式顶部的说明文字，会随轮询结果变化。 */
+    private val webHint = mutableStateOf(WEB_HINT)
+
+    /** 会话轮询是否已在跑，保证只启动一次。 */
     private var watchRunning = false
 
-    private var inFlight = false
+    /** 本次会话是否已经谈妥（避免重复 finish）。 */
     private var finishedOk = false
-
-    /** 自动模式「用凭据换票」是否已尝试。仅试一次，理由见 [autoLogin]。 */
-    private var credentialLoginTried = false
-
-    /**
-     * 自动模式自愈是否已使用。
-     * `hasAuthTicket()` 仅表示 auth 域存在 TGT cookie，不保证服务端仍认可（过期或别处登出后 cookie 仍在）。
-     * 此类「看似有实则失效」的 TGT 会让页面滑向认证页且不报错，故发现「停在认证页且 TGT 失效」时
-     * 清除旧票再换一次，仅补一次以防死循环。
-     */
-    private var ticketRetried = false
-
-    /** 最近一次探测结果，用于失败时给出准确文案 */
-    private var lastProbe: SessionProbe = SessionProbe.NotLoggedIn("尚未探测")
-
-    /** 用户是否曾走到课表页（含被 403 拦截的那次） */
-    @Volatile
-    private var reachedWdkb = false
-
-    /** 是否已进入「自动接管」模式（检测到认证完成，后续无需用户操作） */
-    @Volatile
-    private var autoLaunched = false
-
-    /** 直链兜底是否已使用 */
-    @Volatile
-    private var fallbackUsed = false
-
-    /**
-     * 走到课表页之后，是否已经用掉「清 ehall cookie + 重走网关链」这次自动复活。
-     *
-     * 为何需要它：`reachedWdkb` 只说明**页面导航到了**课表地址，不代表会话拿到了——
-     * 网关会话过期、或 ehall 侧残留一个失效的 `GS_SESSIONID` 时，页面会被导向 403 错误页，
-     * 而 URL 里仍含 `wdkb`。此时探测必然恒失败，而 [watchSession] 的其余分支
-     * （`!autoLaunched && !reachedWdkb`）已不成立，会一路 `return@repeat` 空转到轮询耗尽，
-     * 用户看到的就是「已打开课表页，正在确认会话…」永不出来。这一标记用来打断该空转。
-     * 只复活一次，防死循环。
-     */
-    @Volatile
-    private var sessionRevived = false
-
-    /**
-     * 已经历的轮询轮数。用于「卡在课表页太久」的超时判定，
-     * 须由所有提前返回的分支共同累加，否则空转的轮次不会被计入（见 [wdkbStuckRounds]）。
-     */
-    @Volatile
-    private var watchRounds = 0
-
-    /**
-     * 连续「已到课表页但探测不通过」的轮数。达 [STUCK_AT_WDKB_ROUNDS] 即判定卡死，
-     * 依次尝试自动复活、最后交还用户（见 [onWdkbStuck]）。
-     */
-    @Volatile
-    private var wdkbStuckRounds = 0
-
-    /** 自动点击入口的尝试次数 */
-    private var clickTries = 0
-
-    /** 当前主框架所在主机名，用于判断用户是否已回到门户 */
-    @Volatile
-    private var currentHost: String = ""
-
-    /**
-     * 连续停在认证页的轮数。正常换票也会短暂经过认证域（不足 1 秒），若连续多轮均停在认证页
-     * 才是真正卡在登录表单。用「连续」而非「曾经」，以避免误判正常换票为卡住。
-     */
-    private var authHostRounds = 0
 
     private lateinit var webView: WebView
 
@@ -293,160 +160,89 @@ class LoginActivity : ComponentActivity() {
         webView = buildWebView()
 
         setContent {
-            SeuTheme {
+            // 登录页也跟着「我的 → 外观」走。它往往是用户看到的第一屏，
+            // 配色不跟会最扎眼（此前这里是裸的 `SeuTheme {}`，于是永远显示默认色）。
+            // 解析规则与主界面共用同一份（themeModeOf / paletteOf），不各写一遍。
+            val themeName by settings.themeMode.collectAsState(initial = null)
+            val paletteName by settings.themePalette.collectAsState(initial = null)
+            SeuTheme(
+                themeMode = themeModeOf(themeName),
+                palette = paletteOf(paletteName),
+            ) {
                 LoginScreen(
                     stage = stage.value,
                     phase = phase.value,
                     hint = hint.value,
                     pageInfo = pageInfo.value,
-                    cookieInfo = cookieInfo.value,
                     probeInfo = probeInfo.value,
                     error = formError.value,
                     store = credentials,
                     webView = webView,
                     onSubmit = ::submitLogin,
-                    onUseWeb = { revealWeb("用户主动改用网页登录") },
-                    onManualCheck = { verify("手动确认") },
+                    onUseWeb = ::openWeb,
+                    onManualCheck = { lifecycleScope.launch { if (probeOnce()) finishOk() } },
                     onGoBack = ::goBack,
-                    onRestart = ::restartFromEntry,
                 )
             }
         }
 
-        DebugLog.i("===== 登录页打开（auto=$autoMode）=====")
-        DebugLog.i("UA = ${webView.settings.userAgentString}")
+        DebugLog.i("===== CHU 登录页打开（auto=$autoMode）=====")
+        hint.value = FORM_HINT
 
-        // 进门前先清掉 ehall 侧残留会话（否则持续 403、不跳统一认证死锁），保留 auth 的 TGT。
-        clearEhallCookies()
-
-        setStatus(LoginPhase.WAITING, FORM_HINT)
-        lifecycleScope.launch { refreshDiagnostics() }
-
-        // 表单模式**不加载任何页面**：门户链等用户提交、或点了「改用网页登录」时再开（见 [openPortal]）。
-        // 这样打开登录页是零网络开销的。
+        // 表单模式**不加载任何页面**：打开登录页是零网络开销的。
         if (autoMode) lifecycleScope.launch { autoLogin() }
     }
-    // -------------------------------- 自动续期与表单提交
+
+    // ---------------------------------------------------------------- 自动登录
 
     /**
-     * 自动续期：使 auth 域出现可用 TGT，随后开门户走完课表会话。
+     * 启动时的静默续期。
      *
-     * 仅尝试一次（见 [credentialLoginTried]）：认证服务端有风控，连续失败会要求验证码，
-     * 无限重试在「密码已改」场景下只会把账号推向锁定，一次不成即交还用户是唯一稳妥策略。
+     * 顺序刻意如此：**先看会话在不在，再考虑碰密码**。
+     * 会话还在时（日常绝大多数情况）完全不需要用到保存的密码——
+     * 这也是「存了密码却几乎用不上」的常态，顺带把风控风险降到零。
      */
     private suspend fun autoLogin() {
-        setStatus(LoginPhase.CHECKING, AUTO_START_HINT)
-
-        // 已有票则无需接触密码——这也是「存了密码却几乎用不上」的常态。
-        if (hasAuthTicket()) {
-            DebugLog.i("auto：auth 域已有 TGT → 不碰密码，直接建会话")
-            establishSession()
+        if (client.hasSession()) {
+            DebugLog.i("auto：会话仍然有效 → 无需登录")
+            exitToCaller(sessionOk = true)
             return
         }
 
         val creds = credentials.load()
         if (creds == null) {
-            DebugLog.i("auto：本地没有可用的账号密码 → 回到表单")
-            degradeToManual("")
+            DebugLog.i("auto：本地没有保存的账号 → 安静地回到表单")
+            hint.value = FORM_HINT
             return
         }
 
-        DebugLog.i("auto：auth 域没有 TGT，但有保存的账号（${creds.username}）→ 开始换票")
-        // 记下来：建立会话时若纯 HTTP 链需要再过一次 CAS，就用这一份，
-        // 不必让 [GatewayAuthClient] 回头再问一次 store（那要多一次 suspend 解密）。
-        sessionCredentials = creds
-        when (val r = tryCredentialLogin(creds.username, creds.password)) {
-            is CasLoginResult.Success -> {
-                DebugLog.i(
-                    "auto：换票成功（TGT 落库=${r.tgtInStore}，有效期 ${r.maxAge} 秒）→ 建会话"
-                )
-                // tgtInStore 为 false 时仍继续：CAS 可能仍认本次会话，否则 [watchSession] 自愈分支会兜底。
-                if (!r.tgtInStore) {
-                    DebugLog.w("auto：TGT 没落进 CookieManager，门户可能仍要求登录")
-                }
-                establishSession()
-            }
-            CasLoginResult.BadCredentials ->
-                degradeToManual("保存的学号或密码不对，请重新输入。")
-            CasLoginResult.CaptchaRequired ->
-                degradeToManual("学校这次要求输入验证码，请点下方「改用网页登录」完成。")
-            CasLoginResult.SessionNotEstablished ->
-                degradeToManual("自动登录没成功（认证会话没建立起来），请手动输入账号密码。")
-            is CasLoginResult.Failed ->
-                degradeToManual("自动登录没成功（${r.reason}），请手动输入账号密码。")
+        setStatus(LoginPhase.CHECKING, AUTO_HINT)
+        DebugLog.i("auto：用保存的账号（${creds.username}）尝试登录")
+        when (val r = auth.login(creds.username, creds.password)) {
+            is ChuAuthResult.Success -> afterAuth(r, auto = true)
+            // 失败一律只报告、不重试：理由见类注释
+            ChuAuthResult.BadCredentials ->
+                degrade("保存的学号或密码不对，请重新输入。")
+            ChuAuthResult.CaptchaRequired ->
+                degrade("学校这次要求验证码，请点下方「改用网页登录」完成。")
+            ChuAuthResult.FlowExpired ->
+                degrade("登录凭据已过期，请再点一次「登录」。")
+            ChuAuthResult.NoSalt ->
+                degrade("登录页结构和预期不一致（缺少加密参数），请改用网页登录。")
+            is ChuAuthResult.Throttled -> degrade(throttleMessage(r))
+            is ChuAuthResult.Failed ->
+                degrade("自动登录没成功（${r.reason}），请手动输入账号密码。")
         }
     }
 
-    /** 执行一次 CAS 换票，不含重试——重试策略在调用方，见 [autoLogin]。 */
-    private suspend fun tryCredentialLogin(username: String, password: String): CasLoginResult {
-        credentialLoginTried = true
-        return casAuth.login(username, password)
-    }
+    // ---------------------------------------------------------------- 表单提交
 
     /**
-     * 认证完成后的统一收口：**先试纯 HTTP 走网关，不行再退 WebView**。
+     * 用表单里的账号密码登录。
      *
-     * 为什么值得这么改：`ehall.seu.edu.cn` 已被零信任网关接管，而网关自带 CAS SSO，
-     * 那条链全是普通 302（详见 [GatewayAuthClient]）。也就是说「过网关」这件事
-     * 本来就不需要页面 JS——旧版非用 WebView 不可，是因为当时只想到「打开门户页点课表」，
-     * 没想到网关自己就提供了一个可直连的 CAS 入口。
-     *
-     * 于是自动续期这条最频繁的路径可以完全不碰 WebView：
-     * 少一次网页加载、少一轮 DOM 点击、少 60 轮轮询，也就少掉了「有时 WebView 登录出问题」
-     * 这一类不稳定的来源。WebView 只作为**兜底**保留：验证码、网关协议变动、
-     * 或纯 HTTP 链走到一半失败时，仍能回退到「打开门户页让人自己点」。
-     *
-     * 走纯 HTTP 成功后仍要探一次会话才算数——判据与 WebView 路径完全一致（[probeOnce]），
-     * 不靠猜测 cookie 名。
-     */
-    private suspend fun establishSession(casAuthenticated: Boolean = false) {
-        // ① 纯 HTTP 走网关
-        setStatus(LoginPhase.CHECKING, GATEWAY_HINT)
-        // 凭据**一律带上**，让 [GatewayAuthClient] 在「TGT 以为还在、其实已过期」时
-        // 还能自助补一次登录；`casAuthenticated` 才是「别重复登录」的开关——
-        // 两者职责不同，别用「不给凭据」来表达「已认证」（那样 TGT 一过期就必然白退回 WebView）。
-        when (val g = runCatching { gatewayAuth.login(sessionCredentials, casAuthenticated) }
-            .getOrElse { GatewayLoginResult.Failed(it.message ?: "异常", emptyList()) }) {
-            is GatewayLoginResult.Success -> {
-                DebugLog.i("纯 HTTP 网关链走通 → 直接探会话（不启 WebView）")
-                g.steps.forEach { DebugLog.i("GW $it") }
-                // 网关 cookie 先落盘：进程若在此刻被回收，重进时网关会话仍在（否则每次都重走一遍）
-                runCatching { CookieManager.getInstance().flush() }
-                // 网关通不代表 ehall 会话就绪（可能还需 ehall 自己那一跳），故探一次再说
-                if (probeOnce()) return
-                DebugLog.w("网关已通但 ehall 会话未就绪 → 退回 WebView 走门户链")
-            }
-            is GatewayLoginResult.NoCasSession -> {
-                DebugLog.w("纯 HTTP：CAS 侧无有效 TGT → 退回 WebView")
-                g.steps.forEach { DebugLog.i("GW $it") }
-            }
-            is GatewayLoginResult.NeedCaptcha -> {
-                DebugLog.w("纯 HTTP：服务端要求验证码 → 只能退回 WebView")
-                g.steps.forEach { DebugLog.i("GW $it") }
-            }
-            is GatewayLoginResult.Failed -> {
-                DebugLog.w("纯 HTTP 网关链未走通（${g.reason}）→ 退回 WebView")
-                g.steps.forEach { DebugLog.i("GW $it") }
-                // 兜底复验：cookie 名字判不出会话，但票可能已经被服务端受理并建好了会话
-                // （实测：送 ST 给 ehall 会直接 200，却不产生任何 cookie，按 cookie 判必然误判失败）。
-                // 真判据只有一个——拿真实业务接口探一次。探通了就不必启 WebView。
-                if (probeOnce()) return
-                DebugLog.w("复验未通过 → 退回 WebView 走门户链")
-            }
-        }
-        // ② 兜底：老路，由网页「打开门户 → 点我的课表」完成
-        DebugLog.i("退回 WebView 门户链")
-        setStatus(LoginPhase.CHECKING, AUTO_START_HINT)
-        openPortal()
-    }
-
-    /**
-     * 表单提交：用账号密码换 TGT，成功后交给门户链完成剩下的步骤。
-     *
-     * 认证这一步是纯 HTTP（见 [CasAuthClient]），所以用户面对的是表单而不是网页；
-     * 之后的门户换票必须由网页执行，故紧接着驱动隐身 WebView（见 [openPortal]）。
-     *
-     * 全程只提交一次密码：失败即如实报告，不自动重试（理由同 [autoLogin]）。
+     * ★ 提交前**先退出登录**。这不是洁癖：如果上一任用户留下了有效的 CAS 凭据，
+     * `GET /login` 会直接 302 发票，于是「用 A 账号的密码」会静默登成 B 账号——
+     * 而且看起来一切正常。换账号是登录页的常规用法，必须清干净。
      */
     private fun submitLogin(username: String, password: String, remember: Boolean) {
         if (phase.value != LoginPhase.WAITING) return
@@ -454,1009 +250,277 @@ class LoginActivity : ComponentActivity() {
         setStatus(LoginPhase.CHECKING, "正在验证账号…")
 
         lifecycleScope.launch {
-            // 提交前清掉 ehall 侧旧会话：网关「有会话 cookie 即不看票据」，
-            // 残留的 GS_SESSIONID 会让后续请求恒 403 且不跳统一认证（见 [clearEhallCookies]）。
-            clearEhallCookies()
+            val user = username.trim()
+            auth.signOut()
+            client.clearSessionCache()
 
-            // 用户刚敲进去的这一份就是本会话最可信的凭据，后续纯 HTTP 链需要再过 CAS 时直接用它。
-            sessionCredentials = Credentials(username.trim(), password)
-
-            val result = runCatching { casAuth.login(username, password) }
-                .getOrElse { CasLoginResult.Failed(it.message ?: "异常") }
-
-            when (result) {
-                is CasLoginResult.Success -> {
+            when (val r = auth.login(user, password)) {
+                is ChuAuthResult.Success -> {
+                    // 先落盘再收工：中途被杀也不会出现"登上了但没记住"
                     if (remember) {
-                        runCatching {
-                            credentials.save(username, password)
-                            // 顺手打开自动续期：用户已经勾了「保存」，意图是明确的，
-                            // 再让他去「我的」页拨一次开关属多余。
-                            credentials.setAutoLogin(true)
-                        }.onFailure { DebugLog.w("凭据保存失败：${it.message}") }
+                        credentials.save(user, password)
+                        credentials.setAutoLogin(true)
+                    } else {
+                        credentials.clear()
+                        credentials.setAutoLogin(false)
                     }
-                    DebugLog.i("表单登录：换票成功（TGT 落库=${result.tgtInStore}）→ 建会话")
-                    // 这次是全新的会话，把上一轮的进度全部复位。
-                    reachedWdkb = false
-                    autoLaunched = false
-                    fallbackUsed = false
-                    clickTries = 0
-                    authHostRounds = 0
-                    ticketRetried = false
-                    credentialLoginTried = true
-                    // 卡死判定同样要从零起算，否则上一轮攒下的轮数会立刻触发复活/交还
-                    sessionRevived = false
-                    watchRounds = 0
-                    wdkbStuckRounds = 0
-                    // 置 true 以启用「卡在认证页」的自愈分支（见 [watchSession] ①.5）：
-                    // 手上可能留着别处登出后失效的废票，那种情况下需要清票重来一次。
-                    autoMode = true
-                    // CAS 已认证，直接走 ehall SSO 入口建会话——
-                    // 不必再绕一圈网关入口自助换票（那条路多一次往返且实测容易空转）。
-                    establishSession(casAuthenticated = true)
+                    afterAuth(r, auto = false)
                 }
-
-                CasLoginResult.BadCredentials -> {
-                    DebugLog.w("表单登录：学号或密码不对")
-                    degradeToManual("学号或密码不对。请检查后重试；连续输错会被要求输入验证码。")
-                }
-                CasLoginResult.CaptchaRequired -> {
-                    DebugLog.w("表单登录：服务端要求验证码")
-                    degradeToManual("学校这次要求输入验证码，请点下方「改用网页登录」完成。")
-                }
-                CasLoginResult.SessionNotEstablished ->
-                    degradeToManual("登录没成功（认证会话没建立起来），请稍后重试。")
-                is CasLoginResult.Failed ->
-                    degradeToManual("登录没成功：${result.reason}")
+                ChuAuthResult.BadCredentials ->
+                    fail("学号或密码不对。请核对后再试 —— 连错几次学校会要求验证码。")
+                ChuAuthResult.CaptchaRequired ->
+                    fail("学校这次要求验证码，请点下方「改用网页登录」完成。")
+                ChuAuthResult.FlowExpired ->
+                    fail("登录凭据已过期，请再点一次「登录」。")
+                ChuAuthResult.NoSalt ->
+                    fail("登录页结构和预期不一致（缺少加密参数），请改用网页登录。")
+                is ChuAuthResult.Throttled -> fail(throttleMessage(r))
+                is ChuAuthResult.Failed -> fail(r.reason)
             }
         }
     }
 
     /**
-     * 把控制权交还用户。
+     * CAS 那一步之后统一收口。
      *
-     * 表单模式下留在表单、把原因写在表单下方：改密码或换账号都只需重填一次，比把人扔进网页直接。
-     * 网页模式下只更新提示、不动页面——用户可能正在网页里过验证码。
+     * **拿到票 ≠ 会话建好了**：票可能因为 `service` 与注册值差一个字符而被判给别处。
+     * 所以这里必须再用真实业务接口确认一次 [probeOnce]，不靠 [ChuAuthResult.Success] 自证。
      */
-    private fun degradeToManual(reason: String) {
-        DebugLog.w("退回用户操作：$reason")
-        autoMode = false
-        if (stage.value == LoginStage.FORM) {
-            formError.value = reason
-            setStatus(LoginPhase.WAITING, FORM_HINT)
+    private suspend fun afterAuth(result: ChuAuthResult.Success, auto: Boolean) {
+        setStatus(LoginPhase.CHECKING, "正在确认课表会话…")
+        DebugLog.i("CAS 完成（协议 ${result.protocol}，跟票到 eams=${result.eamsSession}）→ 用业务接口确认")
+
+        if (probeOnce()) {
+            finishOk()
+            return
+        }
+        val reason = when (val p = lastProbe) {
+            is SessionProbe.NotLoggedIn -> "登录完成了，但课表会话没建起来（${p.reason}）。"
+            is SessionProbe.Failed -> "登录完成了，但确认会话时连不上教务：${p.reason}"
+            is SessionProbe.LoggedIn -> "登录完成了，但会话确认异常。"
+        }
+        if (auto) {
+            degrade("$reason 请手动登录一次。")
         } else {
-            setStatus(
-                LoginPhase.WAITING,
-                if (reason.isBlank()) {
-                    WAITING_HINT
-                } else {
-                    "$reason\n登录完成后 App 会自动接着把课表会话建好。"
-                },
-            )
+            fail(reason)
         }
     }
 
-    /** 露出网页（验证码，或用户主动要求）。此后一切照旧由网页主导。 */
-    private fun revealWeb(reason: String) {
-        DebugLog.i("露出网页：$reason")
-        stage.value = LoginStage.WEB
-        autoMode = false
-        setStatus(LoginPhase.WAITING, WAITING_HINT)
-        openPortal()
+    private fun throttleMessage(r: ChuAuthResult.Throttled): String = when {
+        r.exhausted ->
+            "短时间内尝试次数过多，为避免账号被学校风控锁定，已暂停自动登录。请在 ${r.retryAfterSeconds} 秒后再试。"
+        else ->
+            "刚刚已经试过一次了，请等 ${r.retryAfterSeconds} 秒再试。"
     }
 
-    /** 打开门户入口并开始后台轮询。凡是要走门户链的地方都从这里进。 */
-    private fun openPortal() {
-        webView.loadUrl(LOGIN_ENTRY_URL)
-        startWatch()
+    // ---------------------------------------------------------------- 网页兜底
+
+    /**
+     * 露出网页让用户自己登。
+     *
+     * 长安大学这边这一步**极其简单**：打开 `bkjw.chd.edu.cn/eams/`，EAMS 自己会把人
+     * 导到统一身份认证页，用户登完自然回到业务页。不需要替用户点任何东西——
+     * 标准 Apereo CAS 的跳转链是服务端完成的，没有门户 SPA 那种"必须跑 JS 才出得来"的环节。
+     */
+    private fun openWeb() {
+        formError.value = ""
+        stage.value = LoginStage.WEB
+        webHint.value = WEB_HINT
+        setStatus(LoginPhase.WAITING, WEB_HINT)
+        webView.loadUrl(WEB_ENTRY)
     }
 
     /**
-     * 启动后台轮询，只启动一次。
+     * 网页模式下的会话轮询。
      *
-     * 改造前它在 onCreate 就开跑，于是 60 轮 × 2 秒的轮询窗口会从用户还在输密码时开始倒计时；
-     * 现在改为「真正要用门户链时才启动」。
+     * 为什么不靠"页面跳到了某个 URL"来判断：业务页在未登录时也可能返回 200 的登录页，
+     * URL 未必变。真正的判据只有一个——业务接口能不能读到课表，所以这里直接轮询它。
      */
     private fun startWatch() {
         if (watchRunning) return
         watchRunning = true
         lifecycleScope.launch {
             try {
-                watchSession()
+                repeat(WATCH_ROUNDS) {
+                    delay(WATCH_INTERVAL_MS)
+                    if (probeOnce()) {
+                        finishOk()
+                        return@launch
+                    }
+                }
+                webHint.value = "还没检测到登录成功。若你已登录，请点右上角「已完成」；" +
+                    "也可以返回上一页改用账号密码登录。"
             } finally {
                 watchRunning = false
             }
         }
     }
 
-    // -------------------------------- WebView
-
-    @SuppressLint("SetJavaScriptEnabled")
-    private fun buildWebView(): WebView = WebView(this).apply {
-        settings.javaScriptEnabled = true
-        settings.domStorageEnabled = true
-        settings.cacheMode = WebSettings.LOAD_DEFAULT
-
-        // 基于 WebView 默认 UA（已含真实机型与 Chrome 版本）抹去两处 WebView 特征串："; wv"（部分站点降级/拒绝渲染）
-        // 与 "Version/4.0 "（WebView 固定版本号，真浏览器不如此书写）。UA 供认证页做设备指纹，一次会话内须保持一致，仅此处设一次。
-        settings.userAgentString = settings.userAgentString
-            .replace("; wv", "")
-            .replace(VERSION_MARKER, "")
-
-        // 门户内「我的课表」可能经 `window.open` / `target=_blank` 打开，WebView 默认丢弃此类请求
-        // （未接管 onCreateWindow 即「点了无反应」），故须开启多窗口并在 onCreateWindow 接住。
-        settings.setSupportMultipleWindows(true)
-        settings.javaScriptCanOpenWindowsAutomatically = true
-
-        // 门户首页会 302 到 http，页内又混有 https 资源，两种混合内容均放行以免拦截页面。
-        settings.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
-
-        // 认证页与 ehall 间存在跨站请求，需放开第三方 cookie
-        CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
-
-        /**
-         * 接住 `window.open` / `target=_blank`：以临时 WebView 探出目标 URL，再交主 WebView 打开。
-         * 门户内「我的课表」常以新窗口打开，而开启 `setSupportMultipleWindows(true)` 后必须实现
-         * onCreateWindow，否则请求被静默丢弃（用户只见「点了无反应」且无日志）。
-         * 注意该方法位于 **WebChromeClient** 而非 `WebViewClient`（写错会报 overrides nothing）。
-         */
-        webChromeClient = object : WebChromeClient() {
-
-            /** 将页面自身 console 输出转入本应用日志，门户页白屏时借此查看 Vue 报错。 */
-            override fun onConsoleMessage(consoleMessage: ConsoleMessage): Boolean {
-                DebugLog.i(
-                    "JS[${consoleMessage.messageLevel()}] ${consoleMessage.message()} " +
-                        "@${consoleMessage.sourceId()}:${consoleMessage.lineNumber()}"
-                )
-                return true
-            }
-
-            override fun onCreateWindow(
-                view: WebView,
-                isDialog: Boolean,
-                isUserGesture: Boolean,
-                resultMsg: Message,
-            ): Boolean {
-                val scout = WebView(this@LoginActivity)
-                scout.webViewClient = object : WebViewClient() {
-                    override fun shouldOverrideUrlLoading(
-                        v: WebView,
-                        req: WebResourceRequest,
-                    ): Boolean {
-                        val target = req.url.toString()
-                        DebugLog.i(DebugLog.url("新窗口请求 → 改在主窗口打开:", target))
-                        if (target.startsWith("http")) view.loadUrl(target)
-                        scout.destroy()
-                        return true
-                    }
-                }
-                (resultMsg.obj as WebView.WebViewTransport).webView = scout
-                resultMsg.sendToTarget()
-                return true
-            }
-        }
-
-        webViewClient = object : WebViewClient() {
-
-            /**
-             * 不插手任何 URL，完全交由 WebView 自身浏览器行为。
-             * 此处刻意「什么都不做」，勿再添加「http 升级 https」之类的改写：此前的改写曾将 CAS 回跳的
-             * service 由 http 改为 https 导致验票失配，排查耗时甚久。目标与用户手机浏览器路径完全一致。
-             */
-            override fun shouldOverrideUrlLoading(
-                view: WebView,
-                request: WebResourceRequest,
-            ): Boolean {
-                DebugLog.i(DebugLog.url("导航 →", request.url.toString()))
-                return false
-            }
-
-            override fun onPageStarted(
-                view: WebView,
-                url: String?,
-                favicon: android.graphics.Bitmap?,
-            ) {
-                DebugLog.i(DebugLog.url("onPageStarted:", url))
-                // 尽早记录主机名：判定「是否已回到门户」依赖它（onPageFinished 偏晚）
-                runCatching { Uri.parse(url ?: "").host }.getOrNull()?.let {
-                    if (it.endsWith("seu.edu.cn")) currentHost = it
-                }
-            }
-
-            override fun onPageFinished(view: WebView, url: String?) {
-                DebugLog.i(DebugLog.url("onPageFinished:", url))
-                onWebUrl(url)
-                probeDom(view)
-                // 门户壳的 iframe 高度为 0（见 fitPortalFrame），Vue 挂载后才出现，故 onPageFinished 后再补两次
-                view.postDelayed({ fitPortalFrame(view, "撑满 iframe(+1.5s)") }, 1500)
-                view.postDelayed({ fitPortalFrame(view, "撑满 iframe(+4s)") }, 4000)
-            }
-
-            // 门户与认证页均为 SPA，pushState 换页时 onPageFinished 未必触发，此处兜底
-            override fun doUpdateVisitedHistory(
-                view: WebView,
-                url: String?,
-                isReload: Boolean,
-            ) {
-                onWebUrl(url)
-            }
-
-            override fun onReceivedError(
-                view: WebView,
-                request: WebResourceRequest,
-                error: WebResourceError,
-            ) {
-                if (!request.isForMainFrame) return
-                DebugLog.e("主框架加载失败: ${error.description} @ ${request.url}")
-                pageInfo.value = "加载失败：${error.description}"
-                setStatus(
-                    LoginPhase.WAITING,
-                    if (error.description.contains("CLEARTEXT", ignoreCase = true)) {
-                        "学校页面里混着 http://，被 Android 的明文拦截挡住了。" +
-                            "本工程已对 seu.edu.cn 放行（network_security_config.xml）——" +
-                            "若仍看到这条，请确认装的是最新构建的包。"
-                    } else {
-                        "页面没能打开（${error.description}）。检查网络后点「重新开始」再试。"
-                    },
-                )
-            }
-
-            override fun onReceivedHttpError(
-                view: WebView,
-                request: WebResourceRequest,
-                errorResponse: WebResourceResponse,
-            ) {
-                // 记录所有失败请求（不只主框架）：门户白屏时「哪个 API 失败」往往就是答案。
-                DebugLog.w(
-                    "HTTP ${errorResponse.statusCode} " +
-                        "${if (request.isForMainFrame) "[主框架] " else "[资源] "}${request.url}"
-                )
-                if (request.isForMainFrame) {
-                    pageInfo.value =
-                        "HTTP ${errorResponse.statusCode} ${shorten(request.url.toString())}"
-                    // 此处不清 cookie：清除 ehall cookie 会连同用户刚建立的会话一并作废，
-                    // 只能由「重新开始」显式触发。
-                }
-            }
-        }
-    }
-
-    /**
-     * 后台主循环（**兜底路径**）：当纯 HTTP 走网关失败时，才由它驱动隐身 WebView
-     * 自动完成「登录之后」的全部步骤，并在可取数据时收工返回。
-     * 三阶段：① 等待认证完成（auth 域出现 TGT 且页面已回到门户）；② 替用户点击门户内「我的课表」
-     * （两步：先点应用卡片，门户弹二次确认框，再点「打开」）；③ 探测接口，取得合法 JSON 即返回。
-     *
-     * 第 ② 步为何是「点击」而非「自拼课表地址」：门户点开应用时，由门户自己决定 URL、gid_、
-     * 请求头与跳转，程序不必也不该猜。直链在**网关会话已建立**时通常也能取到会话，
-     * 但网关未建立时会先被 302 到 SPA（见 [GatewayAuthClient]）——这正是纯 HTTP 那条路要解决的。
-     *
-     * 兜底：点不到则退回直链（先过网关，见 [fallbackToDirect]）；用户手动点开课表（[reachedWdkb]）
-     * 亦启动探测；到课表页却始终探不通则由 [onWdkbStuck] 复活或交还用户。
-     *
-     * ⚠️ **每轮都必须计轮数、且异常不得逃逸**。原先的实现有两个静默死区，都会让界面
-     * 永久停在「已打开课表页，正在确认会话…」：
-     *   1) `reachedWdkb == true` 后若一路走 `return@repeat`，轮次照数但什么也不做，
-     *      60 轮跑完只改一句文案，用户看起来就是卡住；
-     *   2) 任一行的异常（如个别 ROM 上 `CookieManager` 抛错）会击穿 `repeat` 直接结束本函数，
-     *      而 [startWatch] 只会启动一次，于是**再没有任何东西会去探测**。
-     * 故现在：轮数在所有分支统一累加（[watchRounds]），主体包在 try/catch 里，
-     * 并新增 [onWdkbStuck] 这条「到页却不通过」的判定，让空转有终点。
-     */
-    private suspend fun watchSession() {
-        try {
-            repeat(MAX_WATCH_ROUNDS) { round ->
-                delay(WATCH_INTERVAL_MS)
-                if (finishedOk) return
-
-                watchRounds++
-
-                authHostRounds = if (currentHost == AUTH_HOST) authHostRounds + 1 else 0
-
-                // ① 认证完成 → 进入自动接管
-                if (!autoLaunched && hasAuthTicket() && onPortal()) {
-                    autoLaunched = true
-                    DebugLog.i("认证已完成（auth 域已有 TGT）→ 开始自动接管")
-                    setStatus(LoginPhase.CHECKING, AUTO_HINT)
-                    return@repeat  // 给门户时间渲染应用列表
-                }
-
-                // ①.5 卡在认证页 = 手上的票为废票（cookie 仍在、服务端已不认）。TGT 过期或别处登出后 cookie 不消失，
-                // 导致 hasAuthTicket() 仍为真，但门户将其打发至认证页、认证页见「有票」又不显表单，用户卡在登不进的页面。
-                if (autoMode && !autoLaunched && !ticketRetried && authHostRounds >= STUCK_AT_AUTH_ROUNDS) {
-                    ticketRetried = true
-                    if (credentialLoginTried) {
-                        // 密码这条本轮已经试过还是卡住 → 不再纠缠，交回给人（避免把账号试进锁定）
-                        degradeToManual("自动登录没成功，请手动登录一次。")
-                        return
-                    }
-                    DebugLog.w("auto：连续 $authHostRounds 轮停在认证页 → 判定旧票失效，清票后重新换一次")
-                    clearAuthTicket()
-                    val creds = credentials.load()
-                    if (creds == null) {
-                        degradeToManual("登录态已失效，请手动登录一次。")
-                        return
-                    }
-                    sessionCredentials = creds
-                    when (tryCredentialLogin(creds.username, creds.password)) {
-                        is CasLoginResult.Success -> openPortal()
-                        CasLoginResult.BadCredentials ->
-                            degradeToManual("保存的学号或密码不对，请手动登录一次（可在「我的」页重新保存）。")
-                        CasLoginResult.CaptchaRequired ->
-                            degradeToManual("学校这次要求输入验证码，请手动登录一次。")
-                        else ->
-                            degradeToManual("自动登录没成功，请手动登录一次。")
-                    }
-                    return@repeat
-                }
-
-                // ② 替用户完成「点开课表」这条链：须每轮都点，不能「点中一次即收手」——门户点开应用先弹
-                // 二次确认框，完整动作是「点课表 → 点打开」两步。故改为一直点到真正走到课表页（[reachedWdkb]），
-                // 由 [CLICK_ENTRY_JS] 判断当前该点哪个（有确认框点「打开」，否则点「我的课表」）。
-                if (autoLaunched && !reachedWdkb) {
-                    if (clickTries < MAX_CLICK_TRIES) {
-                        clickTries++
-                        clickTimetableEntry()
-                        return@repeat
-                    }
-                    // 点击次数已耗尽。直链兜底只能发起一次，用完仍没到课表页就从这里退出循环，
-                    // **不能**落到下面的 `!autoLaunched && !reachedWdkb` 分支——那样每轮都会
-                    // 静默 `return@repeat` 空转到 60 轮上限，用户界面一直停在「正在自动打开课表…」。
-                    // 归纳到同样一处「到不了课表页」的出口，与 [onWdkbStuck] 共用话术。
-                    if (!fallbackUsed) {
-                        fallbackUsed = true
-                        DebugLog.w("自动点击没能走到课表页（试了 $MAX_CLICK_TRIES 次）→ 退回直链")
-                        fallbackToDirect()
-                        return@repeat
-                    }
-                    DebugLog.w("点击已耗尽且直链兜底也未到课表页 → 交还用户")
-                    degradeToManual(
-                        "没能自动打开「我的课表」，请手动点开一次；" +
-                            "或点「改用网页登录」自行操作。",
-                    )
-                    return
-                }
-
-                // 未自动接管且用户也未手动走到课表页时，探测必然失败，无需再发请求
-                if (!autoLaunched && !reachedWdkb) return@repeat
-
-                // ③ 探测。这里是原先的第二个死区：`reachedWdkb` 为真但会话拿不到时，
-                // 上面所有分支都不再命中，只会一遍遍走到这里探、次次失败，最后静默耗尽。
-                // 故探不通则累计 [wdkbStuckRounds]，由 [onWdkbStuck] 决定复活还是交还用户。
-                DebugLog.i("后台轮询第 ${round + 1} 次（autoLaunched=$autoLaunched）")
-                if (probeOnce()) return
-
-                wdkbStuckRounds++
-                if (onWdkbStuck()) return
-            }
-            if (!finishedOk) {
-                setStatus(
-                    LoginPhase.WAITING,
-                    if (stage.value == LoginStage.WEB) {
-                        // WEB 通路：网页露出，右上角确实有「已完成」按钮，可以指它
-                        "还没拿到课表会话。若尚未登录请先登录；已登录的话，" +
-                            "点右上角「已完成」再试一次，或点「重新开始」。"
-                    } else {
-                        // 表单通路：网页是隐藏的，右上角没有「已完成」按钮，
-                        // 此时提它只会让用户去找一个不存在的东西。这里只给可执行的动作。
-                        "还没拿到课表会话，请再点一次「登录」；" +
-                            "若反复不行，可点「改用网页登录」手动操作。"
-                    },
-                )
-            }
-        } catch (e: kotlinx.coroutines.CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            // 单轮里任何未被就地消化的异常都不该让轮询整体消失——那会让界面永久停在
-            // 中途的文案上，且 [startWatch] 不会重启它。这里兜住并如实告知用户。
-            DebugLog.e("后台轮询异常终止（第 $watchRounds 轮）：${e.message}")
-            if (!finishedOk) {
-                degradeToManual("登录过程出了点问题（${e.message ?: e::class.simpleName}），请重试一次。")
-            }
-        }
-    }
-
-    /**
-     * 「已到课表页、但会话始终探测不通过」的处理。返回 true 表示本次流程结束（或已重开一轮）。
-     *
-     * 这是原先**最贵的一个盲区**：`reachedWdkb` 只记录「页面导航到了含 `wdkb` 的地址」，
-     * 而网关会话过期、或 ehall 侧残留失效 `GS_SESSIONID` 时，页面同样会停在那样一个 URL 上
-     * ——只是内容是 403 错误页。此时探测恒失败、其余分支又都不命中，界面就永久停在
-     * 「已打开课表页，正在确认会话…」。
-     *
-     * 两级动作：
-     *   ① 首次判定卡住 → 清 ehall 侧 cookie 并重走网关链（[reviveSession]），只做一次；
-     *   ② 复活后仍卡住 → 交还用户，并给出与通路匹配的出口话术（不再空转）。
-     */
-    private fun onWdkbStuck(): Boolean {
-        if (wdkbStuckRounds < STUCK_AT_WDKB_ROUNDS) return false
-
-        if (!sessionRevived) {
-            sessionRevived = true
-            DebugLog.w("已到课表页但连续 $wdkbStuckRounds 轮探测不通过 → 清 ehall 残留会话并重走网关链")
-            reviveSession()
-            return false
-        }
-
-        DebugLog.w("复活后仍拿不到会话（${describe(lastProbe)}）→ 交还用户")
-        setStatus(
-            LoginPhase.WAITING,
-            if (stage.value == LoginStage.WEB) {
-                "课表页已打开但会话没建成（${describe(lastProbe)}）。" +
-                    "可点右上角「已完成」重试，或点「重新开始」重走一遍。"
-            } else {
-                "课表页已打开但会话没建成（${describe(lastProbe)}）。" +
-                    "请点「改用网页登录」手动打开一次「我的课表」，或重试登录。"
-            },
-        )
-        return true
-    }
-
-    /**
-     * 清 ehall 侧残留会话，然后重走「过网关 → 直链课表页」。
-     *
-     * 为什么清 cookie 有用：ehall 的会话网关「有会话 cookie 就不再看票据」——`GS_SESSIONID`
-     * 哪怕已失效也会让它既不认（整页 403）也不跳统一认证。清掉才能拿到干净会话
-     * （见 [clearEhallCookies] 的对照实验）。
-     *
-     * 清完**必须重新过网关**再直链：ehall 侧会话是在网关放行之后才建立的，
-     * 只清不重过就还是在门外。[fallbackToDirect] 已含「先过网关」，故此处不重复调。
-     */
-    private fun reviveSession() {
-        DebugLog.i("复活：清 ehall 残留会话 → 重走网关链并直链课表页")
-        clearEhallCookies()
-        reachedWdkb = false
-        clickTries = 0
-        fallbackUsed = false
-        // 从零起算：复活后本函数已消费掉「自动复活」额度（sessionRevived 保持 true），
-        // 卡住判定需重新累计，才能在复活也无效时走到「交还用户」那一级。
-        wdkbStuckRounds = 0
-        fallbackToDirect()
-    }
-
-    /**
-     * 退回「直接打开课表地址」这条兜底。
-     *
-     * **先过一遍网关**再加载直链：ehall 已被零信任网关接管（见 [GatewayAuthClient]），
-     * 网关会话不在时直链只会被 302 到 SPA、页面永远到不了课表。原实现直接
-     * `loadUrl(EHALL_APP_URL)`，在网关会话过期后必然白跳一次——这正是「卡在已打开课表页」
-     * 的一个来源，故这里补齐前置条件。网关不通也照跳：让门户链去完成它那一步。
-     */
-    private fun fallbackToDirect() {
-        lifecycleScope.launch {
-            val g = runCatching { gatewayAuth.login(sessionCredentials) }
-                .getOrElse { GatewayLoginResult.Failed(it.message ?: "异常", emptyList()) }
-            if (g is GatewayLoginResult.Success) {
-                runCatching { CookieManager.getInstance().flush() }
-            } else {
-                DebugLog.w("直链兜底前没能过网关（${(g as? GatewayLoginResult.Failed)?.reason ?: "无 CAS 会话"}）")
-            }
-            webView.post { webView.loadUrl(EHALL_APP_URL) }
-        }
-    }
-
-    /**
-     * 在门户页面内点击——点「我的课表」还是确认框「打开」由 JS 自行判断。
-     * 为何「点元素」而非「自拼 URL」：见 [watchSession]，点击真实元素使 URL、gid_、请求头、跳转全由门户决定。
-     * 返回值仅用于打日志，调用方不依赖：是否点中最终由能否走到课表页判定，而非此处猜测。
-     */
-    private fun clickTimetableEntry() {
-        webView.evaluateJavascript(CLICK_ENTRY_JS) { raw ->
-            DebugLog.i("自动点击 → ${raw.orEmpty().take(200)}")
-        }
-    }
-
-    /**
-     * 统一身份认证是否完成——判据为 auth 域出现 TGT。认 TGT 而非「页面是否跳回门户」：TGT 是 CAS 中
-     * 「此人已通过认证」的凭证（cookie 名即 `TGT`），一旦出现即可换票，比任何页面特征可靠，且不受 SPA
-     * pushState 换页（不触发 onPageFinished）影响。只读名字不打印值：TGT 的值本身即凭证。
-     */
-    private fun hasAuthTicket(): Boolean {
-        val raw = runCatching {
-            CookieManager.getInstance().getCookie("https://auth.seu.edu.cn/")
-        }.getOrNull().orEmpty()
-        return raw.split(';').any {
-            val t = it.trim()
-            t.startsWith("TGT=") && t.length > "TGT=".length
-        }
-    }
-
-    /** 当前是否停在门户（而非仍在认证页）——避免登录进行中抢走页面 */
-    private fun onPortal(): Boolean = currentHost == "i.seu.edu.cn"
-
-    /**
-     * 探测一次会话。成功即 [finish] 返回。
-     *
-     * 以接口为判据而非页面形态：页面白屏 / 403 / 正常都无关紧要，课表数据均经接口获取
-     * （`dqxnxq.do` 等）。
-     */
-    private suspend fun probeOnce(): Boolean {
-        val result = client.probeSession()
-        lastProbe = result
-        probeInfo.value = describe(result)
-        DebugLog.i("探测结果 = ${describe(result)}")
-        refreshDiagnostics()
-
-        if (result is SessionProbe.LoggedIn) {
-            CookieManager.getInstance().flush()   // 落盘，进程被回收后仍可复用
-            DebugLog.i("===== 登录成功：${describe(result)} =====")
-            finishedOk = true
-            setStatus(LoginPhase.DONE, "登录成功，正在返回…")
-            setResult(RESULT_OK)
-            finish()
-            return true
-        }
-        return false
-    }
-
-    /** 用户主动确认：多探几次，覆盖"会话刚建好"的时间窗 */
-    private fun verify(trigger: String) {
-        if (inFlight || finishedOk) return
-        inFlight = true
-
-        lifecycleScope.launch {
-            setStatus(LoginPhase.CHECKING, "正在确认课表会话…")
-            var ok = false
-            for (i in 1..MANUAL_ATTEMPTS) {
-                DebugLog.i("$trigger：探测第 $i/$MANUAL_ATTEMPTS 次")
-                ok = probeOnce()
-                if (ok) return@launch
-                if (i < MANUAL_ATTEMPTS) delay(RETRY_DELAY_MS)
-            }
-
-            inFlight = false
-            val reason = when (val p = lastProbe) {
-                is SessionProbe.Failed -> "${p.reason}（接口没通，可能是网络问题）"
-                is SessionProbe.NotLoggedIn -> p.reason
-                is SessionProbe.LoggedIn -> ""
-            }
-            DebugLog.w("$trigger：仍未拿到会话（$reason）")
-            setStatus(
-                LoginPhase.WAITING,
-                "还没拿到课表会话（$reason）。" +
-                    "如果还没登录，请先在上面登录；登录后记得点开办事大厅里的「我的课表」，" +
-                    "App 会在那之后自动确认。",
-            )
-        }
-    }
-
-    /** 页面变化时更新诊断信息；走到课表页就打开轮询开关 */
-    private fun onWebUrl(url: String?) {
-        if (url == null) return
-        pageInfo.value = shorten(url)
-
-        val host = runCatching { Uri.parse(url).host }.getOrNull() ?: return
-        currentHost = host            // 给"认证完成了没有、能不能自动开课表"用
-        if (!host.endsWith("seu.edu.cn")) return
-
-        if (url.contains(WDKB_MARK)) {
-            if (!reachedWdkb) {
-                reachedWdkb = true
-                DebugLog.i("检测到课表微应用页面 → 开始后台探测会话")
-                setStatus(LoginPhase.WAITING, BOARD_HINT.getValue(stage.value))
-            }
-            // 页面刚加载完时它自己的初始化请求可能还没回来，交给轮询等一两轮
-        }
-    }
-
+    /** 网页里返回：退回表单（而不是直接退出登录页）。 */
     private fun goBack() {
-        // 表单模式下没有「上一页」可退，直接结束本页；
-        // 网页模式则退回网页的上一页——用户点歪了不该被困住。
-        if (stage.value == LoginStage.WEB && webView.canGoBack()) {
-            webView.goBack()
-        } else {
-            finish()
-        }
-    }
-
-    /**
-     * 重新开始：清除 ehall 侧 cookie，回到入口重走一遍。
-     *
-     * 严禁调用 `removeAllCookies()`：它会连 auth.seu.edu.cn 的 TGT 一并清除，而 TGT 是
-     * 「用户已通过统一身份认证」的凭证，清除即强制重新输入账号密码。
-     */
-    private fun restartFromEntry() {
-        DebugLog.w("用户点了「重新开始」：清 ehall 侧 cookie，保留统一身份认证的 TGT")
-        clearEhallCookies()
-        reachedWdkb = false
-        autoLaunched = false
-        finishedOk = false
-        inFlight = false
-        // 用户主动重开，将自动模式两道闸门复位：此为用户明确意图，不适用「仅试一次」的防误伤约束。
-        authHostRounds = 0
-        ticketRetried = false
-        credentialLoginTried = false
-        // 卡死判定的累积值一并清零，让重开后重新获得完整的「复活 + 交还」额度
-        sessionRevived = false
-        watchRounds = 0
-        wdkbStuckRounds = 0
-        fallbackUsed = false
-        clickTries = 0
-        lastProbe = SessionProbe.NotLoggedIn("尚未探测")
-        probeInfo.value = "尚未探测"
-        formError.value = ""
-        setStatus(
-            LoginPhase.WAITING,
-            if (stage.value == LoginStage.WEB) WAITING_HINT else FORM_HINT,
-        )
-        lifecycleScope.launch { refreshDiagnostics() }
-        // 表单模式的「重来」只是清掉 ehall 残留、等用户重新提交；
-        // 只有网页模式才需要退回入口把整条链重走一遍。
-        if (stage.value == LoginStage.WEB) openPortal()
-    }
-
-    /**
-     * 将 ehall 侧 cookie 全部置为过期，保留统一身份认证（auth）的 TGT。
-     *
-     * 为何非清不可：ehall 网关「有会话 cookie 即不看票据」。只要 GS_SESSIONID 仍在
-     * （即便服务端会话早已失效），它既不认（返回整页 403）也不跳统一认证，登录入口永远不出现。
-     * 实测对照：带 GS_SESSIONID → 403；去除 GS_SESSIONID → 302 → 统一认证。
-     */
-    private fun clearEhallCookies() {
-        val cm = CookieManager.getInstance()
-
-        // ① 枚举：以各层路径查询，收齐 ehall 侧出现过的 cookie 名
-        val names = mutableSetOf<String>()
-        EHALL_COOKIE_PATH_CANDIDATES.forEach { path ->
-            runCatching { cm.getCookie(EHALL_BASE + path) }.getOrNull().orEmpty()
-                .split(';')
-                .forEach { names += it.substringBefore('=').trim() }
-        }
-        names.remove("")
-
-        if (names.isEmpty()) {
-            DebugLog.i("ehall 侧本来就没有 cookie，无需清理")
+        if (stage.value == LoginStage.WEB) {
+            stage.value = LoginStage.FORM
+            setStatus(LoginPhase.WAITING, hint.value)
             return
         }
-
-        // ② 覆盖：每个名字 × 每条候选路径均置过期，路径须显式写入 cookie 串（见上方注释）。
-        EHALL_COOKIE_PATH_CANDIDATES.forEach { path ->
-            names.forEach { name ->
-                cm.setCookie(
-                    EHALL_BASE,
-                    "$name=; Path=$path; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0",
-                )
-            }
-        }
-        cm.flush()
-
-        // ③ 自查：仅报名字不报值。此清理曾「看似成功、实则未删」，自查可及时发现。
-        val left = runCatching { cm.getCookie(EHALL_API_PROBE) }.getOrNull().orEmpty()
-            .split(';')
-            .map { it.substringBefore('=').trim() }
-            .filter { it.isNotEmpty() }
-        DebugLog.w(
-            "ehall cookie 清理：目标=${names.joinToString(",")}；" +
-                "接口侧残留=${if (left.isEmpty()) "无" else left.joinToString(",")}" +
-                "（auth 的 TGT 保持不动）"
-        )
+        setResult(RESULT_CANCELED)
+        finish()
     }
+
+    // ---------------------------------------------------------------- 会话探测
+
+    private var lastProbe: SessionProbe = SessionProbe.NotLoggedIn("尚未探测")
+
+    /**
+     * 用一次真实业务接口调用判断会话。
+     *
+     * 直接看骨架页而不是调 [ChuClient.hasSession]：后者为了调用方便把异常压成了 false，
+     * 于是"网络不通"会被报成"没登录"——正好会让人去反复重登，而其实该做的是等一会儿。
+     */
+    private suspend fun probeOnce(): Boolean {
+        val result = try {
+            val sk = client.skeleton(force = true)
+            if (sk.ids != null) {
+                SessionProbe.LoggedIn("课表页返回 ids=${sk.ids}")
+            } else {
+                SessionProbe.NotLoggedIn("课表页被换成了登录页")
+            }
+        } catch (e: NotLoggedInException) {
+            SessionProbe.NotLoggedIn(e.message ?: "会话已失效")
+        } catch (e: Exception) {
+            SessionProbe.Failed(e.message ?: (e::class.simpleName ?: "未知错误"))
+        }
+        lastProbe = result
+        probeInfo.value = describe(result)
+        DebugLog.i("探测 = ${describe(result)}")
+        return result is SessionProbe.LoggedIn
+    }
+
+    private fun describe(r: SessionProbe): String = when (r) {
+        is SessionProbe.LoggedIn -> "已登录（${r.detail}）"
+        is SessionProbe.NotLoggedIn -> "未登录（${r.reason}）"
+        is SessionProbe.Failed -> "异常（${r.reason}）"
+    }
+
+    // ---------------------------------------------------------------- 收尾
 
     private fun setStatus(p: LoginPhase, h: String) {
         phase.value = p
         hint.value = h
     }
 
-    /**
-     * 仅清 auth 域票据（TGT / CHIPER_UID），不动 ehall 侧。
-     *
-     * 适用场景：手上的 TGT 已服务端作废（过期或在别处登出过）但 cookie 仍在。此时 CAS 认为
-     * 「已登录过」而不显登录表单，用户卡在登不进也退不出的页面。清除后认证页才会重新出表单。
-     *
-     * 与 [clearEhallCookies] 为反向操作，勿混淆：
-     *   清 ehall → 解 403 死锁（有会话 cookie 即不看票据），保留 TGT；
-     *   清 auth  → 解「废票卡登录页」，清除 TGT。
-     * 混清即把用户打回原点（重输账号密码），故仅 [watchSession] 明确判定「旧票失效」时调用。
-     */
-    private fun clearAuthTicket() {
-        val cm = CookieManager.getInstance()
-        // 路径除 `/` 外，覆盖认证域常见路径（同名票可能落在不同 path）
-        listOf("/", "/auth", "/dist", "/auth/casback").forEach { path ->
-            listOf("TGT", "CASTGC", "CHIPER_UID").forEach { name ->
-                cm.setCookie(
-                    AUTH_BASE,
-                    "$name=; Path=$path; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0",
-                )
+    /** 自动模式失败：安静地退回表单，把原因写在表单下方，而不是弹窗打断。 */
+    private fun degrade(reason: String) {
+        DebugLog.w("自动登录未成功：$reason")
+        phase.value = LoginPhase.WAITING
+        stage.value = LoginStage.FORM
+        hint.value = FORM_HINT
+        formError.value = reason
+    }
+
+    private fun fail(reason: String) {
+        DebugLog.w("登录失败：$reason")
+        phase.value = LoginPhase.WAITING
+        formError.value = reason
+    }
+
+    private fun finishOk() {
+        if (finishedOk) return
+        finishedOk = true
+        phase.value = LoginPhase.DONE
+        DebugLog.i("登录成功，返回调用方")
+        exitToCaller(sessionOk = true)
+    }
+
+    private fun exitToCaller(sessionOk: Boolean) {
+        // 会话落盘：进程若在此刻被回收，重进时还能用它。这是唯一值得 flush 的时机。
+        runCatching { CookieManager.getInstance().flush() }
+        setResult(if (sessionOk) RESULT_OK else RESULT_CANCELED)
+        finish()
+    }
+
+    // ---------------------------------------------------------------- WebView
+
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun buildWebView(): WebView = WebView(this).apply {
+        settings.javaScriptEnabled = true
+        settings.domStorageEnabled = true
+        // 与后台自动登录用同一个 UA：服务端会依赖 UA 判定风控字段，
+        // 两条路表现为"同一个客户端"才不会互相当成异常。
+        settings.userAgentString = CHU_UA_FOR_WEB
+        settings.useWideViewPort = true
+        settings.loadWithOverviewMode = true
+        // 业务域是 http、认证域是 https，跳转过程中可能混用；兜底路径以求能用为先。
+        settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+
+        CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+
+        webViewClient = object : WebViewClient() {
+            override fun onPageFinished(view: WebView?, url: String?) {
+                pageInfo.value = shorten(url)
+                DebugLog.i("网页落点：${shorten(url)}")
+                // 每落一页就试着探测一次；成功即收工
+                if (stage.value == LoginStage.WEB) {
+                    startWatch()
+                    lifecycleScope.launch { if (probeOnce()) finishOk() }
+                }
             }
         }
-        cm.flush()
-        DebugLog.w("已清掉 auth 域票据（TGT / CHIPER_UID），让认证页重新出登录表单")
-    }
 
-    // -------------------------------- 诊断
-
-    /**
-     * 修复门户壳布局：将 iframe（`#template-container`）及其祖先链全部撑满视口。
-     *
-     * 白屏根因（DOM 探针实测）：门户首页加载正常，外壳 Vue 与内层门户均挂载成功，
-     * 唯独 iframe 高度为 0（CSS 高 100%，但 WebView 中高度链未接上）。修法为逐级显式设视口高度，
-     * iframe 内层 `height:100%` 随之解析，门户完整显示。已有高度（>50px）则不动，对其他页面无影响。
-     */
-    private fun fitPortalFrame(view: WebView, tag: String) {
-        val js = """
-            (function(){
-              var f = document.getElementById('template-container');
-              if (!f) return 'no-frame';
-              if (f.clientHeight > 50) return 'already ' + f.clientHeight;
-              var h = window.innerHeight;
-              document.documentElement.style.height = h + 'px';
-              if (document.body) { document.body.style.height = h + 'px'; document.body.style.margin = '0'; }
-              var n = f;
-              while (n && n !== document.body) {
-                n.style.height = h + 'px';
-                n.style.width = '100%';
-                n.style.display = 'block';
-                n = n.parentElement;
-              }
-              try {
-                var d = f.contentDocument;
-                if (d) {
-                  d.documentElement.style.height = h + 'px';
-                  if (d.body) d.body.style.height = h + 'px';
-                }
-              } catch(e) {}
-              return 'fitted h=' + h + ' -> frame=' + f.clientWidth + 'x' + f.clientHeight;
-            })()
-        """.trimIndent()
-        view.evaluateJavascript(js) { r -> DebugLog.i("$tag = $r") }
+        webChromeClient = object : WebChromeClient() {
+            override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                view?.let { fitNarrow(it) }
+            }
+        }
     }
 
     /**
-     * DOM 探针：页面加载后抓取「内部有何内容」并打日志。
-     *
-     * 白屏仅两种可能，探针可一刀切开：
-     *   - `appLen` 很小（几十）→ Vue 未挂载（JS 未跑或初始化被卡）；
-     *   - `appLen` 很大但 `bodyTxt` 为空 → 内容在，是渲染不可见（CSS / 视口 / 字体）。
-     * 另附 viewport 尺寸——WebView 在未布局完成时加载页面，视口可能 0×0，导致按视口自适应的页面整页空白。
+     * EAMS 是桌面站点，窄屏上会把内容缩成一条。
+     * 取一个略小于常见手机宽度的基准按比例缩放，比让它自己 `loadWithOverviewMode` 更可控。
      */
-    private fun probeDom(view: WebView) {
-        val js = """
-            (function(){
-              var f = document.getElementById('template-container');
-              var out = {
-                url: location.href,
-                elemCount: document.getElementsByTagName('*').length,
-                docH: document.documentElement.clientHeight,
-                winH: window.innerHeight,
-                bodyTxt: (document.body ? (document.body.innerText||'') : '').replace(/\s+/g,' ').slice(0, 120)
-              };
-              if (f) {
-                out.frameSrc = f.getAttribute('src');
-                out.frameBox = f.clientWidth + 'x' + f.clientHeight;
-                try {
-                  var d = f.contentDocument;
-                  if (d) {
-                    out.frameReady = d.readyState;
-                    var fa = d.getElementById('app');
-                    out.frameAppLen = fa ? fa.innerHTML.length : -1;
-                    out.frameTxt = ((d.body||{}).innerText||'').replace(/\s+/g,' ').slice(0, 150);
-                  }
-                } catch(e) { out.frameErr = '' + e; }
-              } else { out.noFrame = true; }
-              return JSON.stringify(out);
-            })()
-        """.trimIndent()
-        view.evaluateJavascript(js) { r -> DebugLog.i("DOM 探针(即时) = $r") }
-        view.postDelayed({
-            view.evaluateJavascript(js) { r -> DebugLog.i("DOM 探针(+6s) = $r") }
-        }, 6000)
+    private fun fitNarrow(view: WebView) {
+        val target = 420f
+        val w = view.width.takeIf { it > 0 }?.toFloat() ?: return
+        val scale = (w / target).coerceIn(0.5f, 3f)
+        if (view.scaleX == scale) return
+        view.setInitialScale((scale * 100).toInt())
     }
 
-    /**
-     * 仅报 cookie 的名字不碰值——名字足以判断会话是否建立，值属敏感信息。
-     * 探测 URL 用真实接口地址，理由见 [EHALL_API_PROBE]。
-     */
-    private suspend fun refreshDiagnostics() = withContext(Dispatchers.IO) {
-        cookieInfo.value = cookieLabel(EHALL_API_PROBE, "ehall") + " · " +
-            cookieLabel("https://i.seu.edu.cn/", "i") + " · " +
-            cookieLabel("https://auth.seu.edu.cn/", "auth")
-        DebugLog.i("cookie：${cookieInfo.value}")
+    private fun shorten(url: String?): String {
+        val u = url?.takeIf { it.isNotBlank() } ?: return "—"
+        return u.removePrefix("https://").removePrefix("http://").take(72)
     }
 
-    private fun cookieLabel(url: String, label: String): String {
-        val raw = runCatching { CookieManager.getInstance().getCookie(url) }.getOrNull()
-        if (raw.isNullOrBlank()) return "$label[无]"
-        val names = raw.split(';')
-            .mapNotNull { it.trim().substringBefore('=').takeIf { s -> s.isNotBlank() } }
-            .distinct()
-        val joined = names.joinToString(",")
-        return "$label[${if (joined.length > 44) joined.take(44) + "…" else joined}]"
-    }
-
-    private fun shorten(url: String): String =
-        url.removePrefix("https://").removePrefix("http://").take(80)
-
-    private fun describe(r: SessionProbe): String = when (r) {
-        is SessionProbe.LoggedIn -> "已登录（${r.detail}）"
-        is SessionProbe.NotLoggedIn -> "未登录（${r.reason}）"
-        is SessionProbe.Failed -> "出错（${r.reason}）"
-    }
+    // ---------------------------------------------------------------- 伴生
 
     companion object {
-        /** 后台轮询：每 2 秒一次，最多 60 次（约 2 分钟）——够用户输完账号密码 */
-        private const val WATCH_INTERVAL_MS = 2000L
-        private const val MAX_WATCH_ROUNDS = 60
-
-        /** 手动确认时的探测次数与间隔：覆盖"会话刚建好"的时间窗 */
-        private const val MANUAL_ATTEMPTS = 3
-        private const val RETRY_DELAY_MS = 1500L
-
-        /** WebView UA 里的固定版本标识，真浏览器不这么写 */
-        private val VERSION_MARKER = Regex("Version/[0-9.]+ ")
-
-        /** 表单模式的开场话术 */
-        private const val FORM_HINT =
-            "用统一身份认证的学号与密码登录。App 会在后台把课表会话一并建好，不用你再点别的。"
-
-        /** 网页模式的话术：此时只剩"在网页里登录"这一步需要人做 */
-        private const val WAITING_HINT =
-            "用校园账号登录即可。登录完成后 App 会自动接着把课表会话建好并返回，" +
-                "不用你再点别的。"
-
-        /** 检测到认证已完成、正在自动打开课表 */
-        private const val AUTO_HINT = "登录成功，正在自动打开课表…"
-
-        /**
-         * 已经到课表页、正在等接口的时刻。
-         *
-         * 分通路：只有 WEB 通路才在界面上放了「已完成」按钮（见 [WebBar] 的挂载条件），
-         * 表单通路的网页是隐藏的、根本没有那个按钮，此时提它只会让用户去找一个不存在的东西。
-         */
-        private val BOARD_HINT = mapOf(
-            LoginStage.WEB to "已打开课表页，正在确认会话… 若一直不返回，点右上角「已完成」。",
-            LoginStage.FORM to "已打开课表页，正在确认会话… 稍等片刻即可，无需操作。",
-        )
-
-        /** 自动点击入口最多试几次（每轮 2s，8 次约 16s），超了就退回直链 */
-        private const val MAX_CLICK_TRIES = 8
-
-        /** 认证域的主机名。用来判断"是不是卡在登录页上了"（见 [authHostRounds] 与 [watchSession] ①.5）。 */
-        private const val AUTH_HOST = "auth.seu.edu.cn"
-
-        /**
-         * 连续几轮停在认证页才判定「卡住」。
-         * 取值须明显大于正常换票路过认证域的时间：正常 SSO 仅停几百毫秒，而每轮轮询 2s。
-         * 取 4 轮（约 8s）既不误伤正常换票，也不让用户久等。
-         */
-        private const val STUCK_AT_AUTH_ROUNDS = 4
-
-        /**
-         * 连续几轮「已到课表页但探测不通过」才判定卡死。
-         *
-         * 须留足余量：走到课表页后，服务端还要拿 ticket 换会话，且课表页自身有几十个初始化请求，
-         * 慢设备上首次探测失败是正常的。取 5 轮（约 10s）能盖住这个时间窗，
-         * 又不会让用户在真正卡住时干等太久（原实现要耗满 60 轮 = 2 分钟才给出一句无用的文案）。
-         */
-        private const val STUCK_AT_WDKB_ROUNDS = 5
-
-        /** 自动模式开场时的文案：让用户知道"不用你动手，稍等" */
-        private const val AUTO_START_HINT = "正在自动登录校园账号，请稍候…"
-
-        /** 正在走纯 HTTP 网关链——与「开网页」那条分开说，便于日志分辨走了哪条路 */
-        private const val GATEWAY_HINT = "正在建立校园网络会话…"
-
-        /** 传 true 走自动模式（有凭据就自己登，失败静默退化成普通登录页）。 */
+        /** 传 true 走自动模式（有保存的凭据就自己登，失败安静退化成普通登录页）。 */
         const val EXTRA_AUTO = "com.seu.timetable.extra.AUTO"
 
         fun intent(context: Context, auto: Boolean = false): Intent =
             Intent(context, LoginActivity::class.java).putExtra(EXTRA_AUTO, auto)
-
-        /**
-         * 在门户页面内替用户「点击」——每次调用推进一步。
-         *
-         * 两步动作，勿只做第一步：点「我的课表」→ 门户弹二次确认框（带「打开」按钮）→ 点「打开」才跳转。
-         * 故按优先级查找：先找「打开」（确认框在则点它），无确认框再点「我的课表」。外层每 2s 调用一次，两步自然串联。
-         *
-         * 为何不用 `el.click()`：门户应用卡片为 `<div>` 包 `<img>` + `<p class="title">我的课表</p>`，
-         * 处理器绑在外层容器，仅点 `<p>` 实测无反应。故改为：① 沿祖先链找「真正可点」的一级
-         * （`cursor:pointer` / `<a>` / 带 `onclick`），找不到则退至父级；② 不调 `el.click()`，
-         * 而是派发完整指针事件序列（pointerdown→mousedown→pointerup→mouseup→click），与真手指一致。
-         *
-         * 搜索范围：优先门户内容所在的同源 iframe（`#template-container`），其次顶层文档
-         * （确认框可能由顶层文档渲染，故两者皆查）。匹配方式：叶子节点且文本恰为目标词，优先可见者。
-         *
-         * 返回值：`clicked:<点了哪个>:<元素>|<祖先链>` / `not-found|<正文片段>` / `click-error:…`。
-         * 带回祖先链以便一次看清门户 DOM 结构。
-         */
-        private val CLICK_ENTRY_JS = """
-            (function(){
-              function visible(e){
-                if (!e.getClientRects) return false;
-                var r = e.getBoundingClientRect();
-                return r.width > 0 && r.height > 0;
-              }
-              function desc(e){
-                var s = e.tagName;
-                if (e.id) s += '#' + e.id;
-                var c = ('' + (e.className || '')).trim();
-                if (c) s += '.' + c.split(/\s+/).join('.');
-                try { s += '{' + getComputedStyle(e).cursor + '}'; } catch (err) {}
-                if (e.getAttribute && e.getAttribute('onclick')) s += '[onclick]';
-                if (e.tagName === 'A' && e.getAttribute('href')) {
-                  s += '[href=' + ('' + e.getAttribute('href')).slice(0, 50) + ']';
-                }
-                return s;
-              }
-              function findLeaf(root, want){
-                var all = root.querySelectorAll('*');
-                var fallback = null;
-                for (var i = 0; i < all.length; i++){
-                  var e = all[i];
-                  if (e.children && e.children.length) continue;
-                  var t = (e.textContent || '').replace(/\s+/g, '');
-                  if (t !== want) continue;
-                  if (visible(e)) return e;
-                  if (!fallback) fallback = e;
-                }
-                return fallback;
-              }
-              function tap(e){
-                var r = e.getBoundingClientRect();
-                var o = {
-                  bubbles: true, cancelable: true, composed: true,
-                  clientX: r.left + r.width / 2, clientY: r.top + r.height / 2,
-                  view: e.ownerDocument.defaultView
-                };
-                var names = ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'];
-                for (var i = 0; i < names.length; i++){
-                  var ev;
-                  try {
-                    ev = (names[i].indexOf('pointer') === 0)
-                      ? new PointerEvent(names[i], o) : new MouseEvent(names[i], o);
-                  } catch (err) { ev = new MouseEvent(names[i], o); }
-                  try { e.dispatchEvent(ev); } catch (err2) {}
-                }
-              }
-              var docs = [];
-              var f = document.getElementById('template-container');
-              if (f) { try { if (f.contentDocument) docs.push(f.contentDocument); } catch (err) {} }
-              docs.push(document);
-
-              var wants = ['打开', '我的课表'];
-              for (var w = 0; w < wants.length; w++){
-                for (var d = 0; d < docs.length; d++){
-                  var el = null;
-                  try { el = findLeaf(docs[d], wants[w]); } catch (err) { el = null; }
-                  if (!el) continue;
-                  var body = el.ownerDocument.body;
-                  var chain = [];
-                  var n = el;
-                  for (var k = 0; k < 5 && n && n !== body; k++, n = n.parentElement) chain.push(desc(n));
-                  var target = el.parentElement || el;
-                  var q = el.parentElement;
-                  for (var j = 0; j < 4 && q && q !== body; j++, q = q.parentElement){
-                    var cur = '', oc = null;
-                    try { cur = getComputedStyle(q).cursor; } catch (err3) {}
-                    if (q.getAttribute) oc = q.getAttribute('onclick');
-                    if (cur === 'pointer' || q.tagName === 'A' || oc) target = q;
-                  }
-                  try { tap(target); } catch (err4) { return 'click-error:' + err4; }
-                  return 'clicked:' + wants[w] + ':' + desc(target) + ' | chain=' + chain.join(' < ');
-                }
-              }
-              var sample = '';
-              try {
-                var b = docs[0].body;
-                if (b) sample = (b.innerText || '').replace(/\s+/g, ' ').slice(0, 100);
-              } catch (err5) {}
-              return 'not-found|' + sample;
-            })()
-        """.trimIndent()
     }
 }
 
 /**
+ * 网页兜底用的 UA —— 刻意与 [ChuClient] / [ChuAuthClient] 用**同一个常量**。
+ *
+ * 服务端会依赖 UA 判定风控字段（`MULTIFACTOR_BROWSER_FINGERPRINT` 之类），
+ * 后台自动登录与网页登录必须表现为"同一个客户端"，否则会被当成异常行为。
+ * 因此这里直接引用 [CHU_UA]，而不是自己再写一遍字符串——复制一份就迟早会不一致。
+ */
+private val CHU_UA_FOR_WEB = CHU_UA
+
+// ---------------------------------------------------------------- 界面
+
+/**
  * 登录页。
  *
- * 结构与理由见 [LoginStage]：
- *  - FORM：表单盖在最上层，门户页以全尺寸但 alpha=0 的状态在背后运行；
- *  - WEB：门户页露出（alpha=1），并让出顶部一条给返回与确认按钮。
+ * [LoginStage.FORM] 时表单盖在最上层；[LoginStage.WEB] 时露出网页。
  *
- * 为何用 alpha 而不用 `visibility` 来藏：WebView 必须真的完成布局，门户 DOM 里
- * `getBoundingClientRect()` 才有非零尺寸，[CLICK_ENTRY_JS] 那句「挑可见元素来点」才有对象可点。
- * `INVISIBLE` / `GONE` 还可能让 WebView 暂停 JS 定时器，故取 alpha=0——对 View 系统而言它仍是 VISIBLE。
- *
- * 另：`AndroidView` 所在的槽位始终存在（内容随 stage 变），以免切换 stage 时它因在 Column 中的
- * 位置变化被重新挂载——那会打断正在进行的门户跳转。
+ * 网页用 `alpha` 而不是 `visibility` 来藏：WebView 必须真的完成布局与加载，
+ * 页面里的脚本才跑得起来（验证码就是脚本渲染的）。`INVISIBLE` / `GONE` 还可能让
+ * WebView 暂停 JS 定时器，故取 alpha=0——对 View 系统而言它仍是 VISIBLE。
  */
 @Composable
 private fun LoginScreen(
@@ -1464,7 +528,6 @@ private fun LoginScreen(
     phase: LoginPhase,
     hint: String,
     pageInfo: String,
-    cookieInfo: String,
     probeInfo: String,
     error: String,
     store: CredentialStore,
@@ -1473,7 +536,6 @@ private fun LoginScreen(
     onUseWeb: () -> Unit,
     onManualCheck: () -> Unit,
     onGoBack: () -> Unit,
-    onRestart: () -> Unit,
 ) {
     val c = LocalSeuColors.current
 
@@ -1487,12 +549,10 @@ private fun LoginScreen(
                 WebBar(
                     hint = hint,
                     pageInfo = pageInfo,
-                    cookieInfo = cookieInfo,
                     probeInfo = probeInfo,
                     phase = phase,
                     onManualCheck = onManualCheck,
                     onGoBack = onGoBack,
-                    onRestart = onRestart,
                 )
             }
 
@@ -1519,17 +579,15 @@ private fun LoginScreen(
     }
 }
 
-/** 网页模式下的顶部条：返回、手动确认、重来，以及三行诊断。 */
+/** 网页模式下的顶部条：返回、手动确认，以及两行诊断。 */
 @Composable
 private fun WebBar(
     hint: String,
     pageInfo: String,
-    cookieInfo: String,
     probeInfo: String,
     phase: LoginPhase,
     onManualCheck: () -> Unit,
     onGoBack: () -> Unit,
-    onRestart: () -> Unit,
 ) {
     val c = LocalSeuColors.current
     val t = LocalSeuType.current
@@ -1547,7 +605,7 @@ private fun WebBar(
                 .padding(horizontal = 20.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            // 用户点歪了能退回去（退化成一个正常浏览器该有的样子）
+            // 用户点歪了能退回去（退化成"一个正常浏览器该有的样子"）
             Box(
                 Modifier
                     .clip(RoundedCornerShape(8.dp))
@@ -1559,8 +617,8 @@ private fun WebBar(
             Spacer(Modifier.weight(1f))
             Text("登录校园账号", style = t.navTitle, color = c.textPrimary)
             Spacer(Modifier.weight(1f))
-            // 兜底出口：学校的页面万一用了没预料到的跳转（比如新窗口、需要额外点确认），
-            // 用户主动确认一次即可，不用卡死在这一页。
+            // 兜底出口：万一有没预料到的跳转（新窗口、额外确认页），
+            // 用户主动确认一次即可，不必卡在这一页。
             Box(
                 Modifier
                     .clip(RoundedCornerShape(8.dp))
@@ -1573,24 +631,13 @@ private fun WebBar(
 
         Column(Modifier.padding(horizontal = 20.dp)) {
             Text(hint, style = t.micro, color = c.textSecondary)
-            // 诊断三行：登录不通时能直接说明卡在哪一步。网页是排障用的界面，故只在这里显示。
+            // 诊断两行：登录不通时能直接说明卡在哪一步。网页是排障用的界面，只在这里显示。
             DiagLine("页面：$pageInfo")
             DiagLine("会话：$probeInfo")
-            DiagLine("cookie：$cookieInfo")
-            if (phase != LoginPhase.DONE) {
-                Box(
-                    Modifier
-                        .clip(RoundedCornerShape(8.dp))
-                        .clickable { onRestart() }
-                        .padding(vertical = 8.dp)
-                ) {
-                    Text("重新开始", style = t.micro, color = c.primary)
-                }
-            }
         }
 
         if (phase == LoginPhase.CHECKING) {
-            // 规格要求：不要全屏转圈，用一条细进度条
+            // 不要全屏转圈，用一条细进度条
             LinearProgressIndicator(Modifier.fillMaxWidth())
         } else {
             Spacer(Modifier.height(6.dp))
@@ -1689,11 +736,14 @@ private fun LoginForm(
         Spacer(Modifier.height(8.dp))
         SeuCard(Modifier.fillMaxWidth()) {
             Column {
-                FieldLabel("学号 / 工号")
+                FieldLabel("学号")
                 AccountField(
                     value = username,
                     onValueChange = { username = it },
-                    placeholder = "例如 213xxxxxx",
+                    // ★ 这里只能是**编造的**示例。曾经填的是真实学号，等于把一个同学的
+                    //   个人信息印在了每个用户的登录页上——而且这行会被提交进公开仓库。
+                    //   改这一行时请守住"一眼看得出是假号"这条线。
+                    placeholder = "例如 2026123456",
                     keyboardType = KeyboardType.Text,
                     masked = false,
                 )
@@ -1757,7 +807,7 @@ private fun LoginForm(
         Text(hint, style = t.caption, color = c.textSecondary)
 
         Spacer(Modifier.height(16.dp))
-        // 出口：验证码，或表单这条路走不通时，退回学校原本的网页登录。
+        // 出口：需要验证码，或表单这条路走不通时，退回学校原本的网页登录。
         Box(
             Modifier
                 .fillMaxWidth()

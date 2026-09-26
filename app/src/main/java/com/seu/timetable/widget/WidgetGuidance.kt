@@ -1,5 +1,7 @@
 package com.seu.timetable.widget
 
+import com.seu.timetable.util.AppIdentity
+
 /**
  * 「一键添加」失败后的手动引导文案。
  *
@@ -21,10 +23,16 @@ object WidgetGuidance {
     /**
      * 手动添加的步骤。**只有** [WidgetVendor.OPPO] 那条写到了「插件」这一层，
      * 因为那是本机看过界面的；别家写到「进入组件中心」为止，剩下的交给系统自己的列表。
+     *
+     * @param appLabel 应用在桌面 / 系统设置里的名字。默认取 [AppIdentity.DISPLAY_NAME]，
+     *   与 `app_name` 一致；写成参数是为了单测能直接调，也避免以后改名时漏掉这两处。
      */
-    fun manualSteps(vendor: WidgetVendor): List<String> = buildList {
+    fun manualSteps(
+        vendor: WidgetVendor,
+        appLabel: String = AppIdentity.DISPLAY_NAME,
+    ): List<String> = buildList {
         if (vendor.showsShortcutHint) {
-            add("先看一眼权限：系统设置 → 应用 → SEU 课表 → 权限，确认「创建桌面快捷方式」是开着的")
+            add("先看一眼权限：系统设置 → 应用 → $appLabel → 权限，确认「创建桌面快捷方式」是开着的")
         }
         add("在桌面用两指捏合（或长按空白处），进入编辑状态")
         add(
@@ -37,14 +45,17 @@ object WidgetGuidance {
         if (vendor == WidgetVendor.OPPO) {
             add("切到「全部卡片」，一直滑到最底部，点「插件」")
         }
-        add("在列表里找到「SEU 课表」")
+        add("在列表里找到「$appLabel」")
         add("选择想要的大小，把它拖到桌面上")
     }
 
     /** 失败弹层的正文：一句结论 + 步骤，最后一句说明这家为什么会被拒（有据可查时才写）。 */
-    fun manualBody(vendor: WidgetVendor): String = buildString {
+    fun manualBody(
+        vendor: WidgetVendor,
+        appLabel: String = AppIdentity.DISPLAY_NAME,
+    ): String = buildString {
         append("这个桌面没有接受应用主动添加，请手动添加：\n\n")
-        manualSteps(vendor).forEachIndexed { index, step ->
+        manualSteps(vendor, appLabel).forEachIndexed { index, step ->
             append(STEP_MARKS.getOrElse(index) { "·" })
             append(" ")
             append(step)

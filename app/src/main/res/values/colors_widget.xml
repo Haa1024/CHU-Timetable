@@ -1,17 +1,23 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  桌面小组件专用色值（浅色）。与 ui/theme/Theme.kt 的 LightSeuColors 保持一致。
+  桌面小组件专用色值（浅色）。与 ui/theme/Theme.kt 的 **LightChuColors** 一致。
 
-  单独抽一份而非直接复用的原因：小组件由桌面进程按 XML 布局渲染，
+  单独抽一份而非直接复用：小组件由桌面进程按 XML 布局渲染，
   拿不到 Compose 的 LocalSeuColors，只能走资源系统。
   深浅色由 values-night 提供同名的另一套取值，布局无需感知主题。
+
+  ★ 这里必须与**默认配色**（Palette.DEFAULT = 长大蓝）对齐，不能停留在旧的那套绿。
+    原因：桌面在「添加小组件」面板里显示的是**用本文件渲染的预览缩略图**，
+    那一步不经过 TodayWidget 的 render()，也就拿不到运行时刷色。
+    资源写绿、界面是蓝，用户看到的就会是"这个组件是绿的"。
+    用户换过配色后由 render() 逐项覆盖（见 TodayWidget.kt 里那段说明）。
 -->
 <resources>
     <color name="widget_surface">#FFFFFF</color>
-    <color name="widget_border">#E6EAE1</color>
-    <color name="widget_divider">#E6EAE1</color>
+    <color name="widget_border">#E4E8F1</color>
+    <color name="widget_divider">#E4E8F1</color>
     <color name="widget_text_primary">#14171A</color>
     <color name="widget_text_secondary">#707580</color>
-    <color name="widget_primary">#4C7D2C</color>
-    <color name="widget_ongoing_bg">#EFF4E9</color>
+    <color name="widget_primary">#133984</color>
+    <color name="widget_ongoing_bg">#EBEFF8</color>
 </resources>

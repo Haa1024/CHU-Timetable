@@ -1,0 +1,17 @@
+	<option value="72">2015-2016学年1学期</option>
+	<option value="73">2015-2016学年2学期</option>
+	<option value="80">2019-2020学年1学期</option>
+	<option value="81">2019-2020学年2学期</option>
+	<option value="82">2020-2021学年1学期</option>
+	<option value="83">2020-2021学年2学期</option>
+	<option value="102">2021-2022学年1学期</option>
+	<option value="122">2021-2022学年2学期</option>
+	<option value="142">2022-2023学年1学期</option>
+	<option value="143">2022-2023学年2学期</option>
+	<option value="162">2023-2024学年1学期</option>
+	<option value="182">2023-2024学年2学期</option>
+	<option value="202">2024-2025学年1学期</option>
+	<option value="203">2024-2025学年2学期</option>
+	<option value="222">2025-2026学年1学期</option>
+	<option value="242">2025-2026学年2学期</option>
+	<option value="262">2026-2027学年1学期</option>

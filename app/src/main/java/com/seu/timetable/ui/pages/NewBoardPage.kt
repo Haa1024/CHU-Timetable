@@ -38,9 +38,10 @@ import androidx.compose.ui.unit.dp
 import com.seu.timetable.data.NotLoggedInException
 import com.seu.timetable.data.SettingsSnapshot
 import com.seu.timetable.data.TimetableRepository
+import com.seu.timetable.data.chu.SemesterProbe
 import com.seu.timetable.domain.BoardMeta
 import com.seu.timetable.domain.DAY_NAMES
-import com.seu.timetable.domain.TermCodes
+import com.seu.timetable.domain.PeriodTimes
 import com.seu.timetable.domain.Timetable
 import com.seu.timetable.ui.components.BackIcon
 import com.seu.timetable.ui.components.InfoRow
@@ -86,6 +87,17 @@ fun NewBoardPage(
     var currentTerm by remember { mutableStateOf<String?>(null) }
     var serverTermName by remember { mutableStateOf<String?>(null) }
     var candidates by remember { mutableStateOf<List<String>>(emptyList()) }
+    /** 学期列表拿不到时的**原因**。必须显示出来，否则只剩一句笼统的提示，无从排查。 */
+    var termNotice by remember { mutableStateOf<String?>(null) }
+
+    /** 导入时用的第一周周一（可改）。查询成功后用预览里的值预填。 */
+    var importMonday by remember { mutableStateOf("") }
+
+    /** 导入时选定的校区。作息预设随它定，两校区相差 35 分钟。 */
+    var importCampus by remember { mutableStateOf(PeriodTimes.Campus.DEFAULT) }
+
+    /** 新建空白表时选定的校区。与导入那份分开存：两个分支互不影响。 */
+    var blankCampus by remember { mutableStateOf(PeriodTimes.Campus.DEFAULT) }
     var termInput by remember { mutableStateOf("") }
     var querying by remember { mutableStateOf(false) }
     var preview by remember { mutableStateOf<Timetable?>(null) }
@@ -105,8 +117,8 @@ fun NewBoardPage(
     }
     var totalWeeksText by remember { mutableStateOf("18") }
     var teachingWeeksText by remember { mutableStateOf("16") }
-    var morningText by remember { mutableStateOf("5") }
-    var afternoonText by remember { mutableStateOf("5") }
+    var morningText by remember { mutableStateOf("4") }
+    var afternoonText by remember { mutableStateOf("4") }
     var eveningText by remember { mutableStateOf("3") }
 
     // ---- 「复制已有课表的设置」的状态 ----
@@ -120,14 +132,28 @@ fun NewBoardPage(
     // 再写 LaunchedEffect 与各处理函数。
 
     LaunchedEffect(Unit) {
-        // 谁也不知道一共有哪些学期（没有列表接口），所以先问"当前是哪个学期"，
-        // 再据此推算前后几个候选。详见 TermCodes 的说明。
-        val current = repo.currentTermCode()
-        currentTerm = current
-        serverTermName = repo.currentTermName()
-        candidates = if (current != null) TermCodes.nearby(current) else emptyList()
-        termInput = current ?: ""
-        if (!nameEdited) boardName = serverTermName.orEmpty()
+        // 候选学期直接取**服务端返回的那份列表**，不再按代码规律推算。
+        //
+        // ★ 长安大学的学期 id 是内部自增数字、跨学年完全不可推算，而"哪些学期真实存在"
+        //   只有服务端知道（`semesterCalendar` 一次就把全部返回了）。原先照
+        //   `学年-学年-学期` 的形式造候选，会出现"点了却什么都查不到"——白跑一趟，
+        //   还容易让人误以为是登录掉了。
+        //
+        // ★ 也刻意用 probeSemester 而不是 currentTermCode：后者把异常吞成 null，
+        //   于是「没登录」「接口报错」「页面结构变了」三种处置完全不同的故障在界面上
+        //   长得一模一样，只剩一句"无法获取当前学期"。失败原因必须留在屏幕上。
+        when (val r = repo.probeSemester()) {
+            is SemesterProbe.Ok -> {
+                currentTerm = r.current.termCode
+                serverTermName = r.current.displayName
+                // 服务端是按学年从早到晚给的，翻过来让最近的学期排在前面
+                candidates = r.all.map { it.termCode }.asReversed()
+                termInput = r.current.termCode
+                if (!nameEdited) boardName = r.current.displayName
+            }
+
+            is SemesterProbe.Failed -> termNotice = r.reason
+        }
         // 已有课表的列表：给"复制已有课表的设置"用
         allBoards = repo.index().boards
     }
@@ -171,9 +197,13 @@ fun NewBoardPage(
         preview = null
         scope.launch {
             try {
-                val tt = repo.fetchFromEhall(target)
+                val tt = repo.fetchTimetable(target)
                 preview = tt
                 previewTermName = if (target == currentTerm) serverTermName else null
+                // 预览里那个 firstMonday 只是兜底值（该学期没配置过就是"本周即第 1 周"）。
+                // 预填出来是为了让用户**看到并修正**它——若只把它摆在只读信息里，
+                // 用户会发现"周次不对"却无从下手。
+                importMonday = tt.term.firstMonday.toString()
                 if (!nameEdited) {
                     boardName = previewTermName ?: target
                 }
@@ -191,11 +221,29 @@ fun NewBoardPage(
 
     fun doImport() {
         val tt = preview ?: return
+        val monday = runCatching { LocalDate.parse(importMonday.trim()) }.getOrNull()
+        if (monday == null) {
+            message = "第一周周一要写成 2026-08-31 这样的日期"
+            return
+        }
+        // 必须是周一：周次推算为 `起点 + (周-1)*7 天 + (星期-1) 天`，
+        // 起点非周一会让整张表的日期偏移（填周三即偏 2 天），而界面不报任何异常。
+        if (monday.dayOfWeek != DayOfWeek.MONDAY) {
+            message = "第一周周一是「${DAY_NAMES[monday.dayOfWeek.value]}」（$monday），" +
+                "但它必须是周一。整张课表的日期均由此往后推算，起点错了会整体偏移。"
+            return
+        }
         saving = true
         message = null
         scope.launch {
             try {
-                val id = repo.saveImported(tt, boardName, previewTermName)
+                val id = repo.saveImported(
+                    timetable = tt,
+                    name = boardName,
+                    termName = previewTermName,
+                    firstMonday = monday,
+                    campus = importCampus,
+                )
                 onCreated(id)
             } catch (e: Exception) {
                 message = "保存失败：${e.message ?: "未知错误"}"
@@ -255,6 +303,9 @@ fun NewBoardPage(
                     morningPeriods = morning,
                     afternoonPeriods = afternoon,
                     eveningPeriods = evening,
+                    // 复制来源时校区也随之（作息值与校区本就绑定，只抄时刻会得到
+                    // "渭水的时刻表 + 南校区的标签"这种自相矛盾的组合）；否则用用户选的
+                    campus = if (copySettings) snapshot?.campus ?: blankCampus else blankCampus,
                     schedule = if (copySettings) snapshot?.scheduleToApply.orEmpty() else emptyList(),
                     copiedFrom = if (copySettings) snapshot?.copiedFromLabel else null,
                 )
@@ -309,6 +360,7 @@ fun NewBoardPage(
                     onTermInput = { termInput = it },
                     candidates = candidates,
                     currentTerm = currentTerm,
+                    notice = termNotice,
                     querying = querying,
                     onQuery = { query(termInput) },
                 )
@@ -324,8 +376,6 @@ fun NewBoardPage(
                                 tt.term.termName.ifBlank { previewTermName ?: tt.term.termCode },
                             )
                             RowDivider()
-                            InfoRow("第一周周一", tt.term.firstMonday.toString())
-                            RowDivider()
                             InfoRow("周数", "${tt.term.totalWeeks} 周（教学周 ${tt.term.lastTeachingWeek} 周）")
                             RowDivider()
                             InfoRow(
@@ -333,14 +383,114 @@ fun NewBoardPage(
                                 "${tt.courses.size} 门 · ${tt.sessions.size} 个时间块" +
                                     if (tt.unplaced.isEmpty()) "" else " · 未排课 ${tt.unplaced.size} 门",
                             )
-                            RowDivider()
-                            InfoRow(
-                                "课表名",
-                                boardName.ifBlank { "（用学期名）" },
+                        }
+                    }
+
+                    // 开学日必须在这里让用户改：教务接口不提供学期起止日期，
+                    // 预览里那个值只是兜底（"把本周当第 1 周"），照它导入会让整张表的
+                    // 周次整体偏掉，而界面上看不出任何异常。
+                    Spacer(Modifier.height(16.dp))
+                    SectionLabel("第一周周一")
+                    Spacer(Modifier.height(8.dp))
+                    SeuCard(Modifier.fillMaxWidth()) {
+                        Column {
+                            SeuTextField(
+                                value = importMonday,
+                                onValueChange = { importMonday = it },
+                                placeholder = "2026-08-31",
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            // 快捷日期。这里不放"往前一周"——导入的必然是已经开学的学期，
+                            // 反复往前调不是常见操作。
+                            val thisMonday = LocalDate.now()
+                                .with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY))
+                            Row(
+                                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                listOf(
+                                    "本周一" to thisMonday,
+                                    "下周一" to thisMonday.plusWeeks(1),
+                                    "上周一" to thisMonday.minusWeeks(1),
+                                ).forEach { (label, date) ->
+                                    val selected = importMonday.trim() == date.toString()
+                                    Box(
+                                        Modifier
+                                            .clip(RoundedCornerShape(SeuRadius.tag))
+                                            .background(if (selected) c.primary else c.surfaceSunken)
+                                            .clickable { importMonday = date.toString() }
+                                            .padding(horizontal = 12.dp, vertical = 7.dp),
+                                    ) {
+                                        Text(
+                                            label,
+                                            style = t.caption,
+                                            color = if (selected) c.onPrimary else c.textSecondary,
+                                        )
+                                    }
+                                }
+                            }
+                            Spacer(Modifier.height(10.dp))
+                            val parsed =
+                                runCatching { LocalDate.parse(importMonday.trim()) }.getOrNull()
+                            val ok = parsed?.dayOfWeek == DayOfWeek.MONDAY
+                            Text(
+                                when {
+                                    parsed == null ->
+                                        "填「第 1 周的周一」是哪天，周次与日期都从它往后推算。"
+                                    ok ->
+                                        "第 1 周从 $parsed 开始；课表页显示「第 N 周」即按它换算。"
+                                    else ->
+                                        "$parsed 是「${DAY_NAMES[parsed.dayOfWeek.value]}」，不是周一。" +
+                                            "起点有误会使整张课表的日期整体偏移，且界面不显示任何异常。"
+                                },
+                                style = t.caption,
+                                color = if (parsed != null && !ok) c.danger else c.textTertiary,
                             )
                         }
                     }
-                    Spacer(Modifier.height(10.dp))
+
+                    // 校区决定作息预设。必须让用户选而不是猜：两校区第一节课相差 35 分钟，
+                    // 选错会让今日页的倒计时与上课提醒整体偏。
+                    Spacer(Modifier.height(16.dp))
+                    SectionLabel("作息")
+                    Spacer(Modifier.height(8.dp))
+                    val preset = PeriodTimes.of(importCampus)
+                    Row(
+                        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        PeriodTimes.Campus.entries.forEach { cp ->
+                            val selected = importCampus == cp
+                            Box(
+                                Modifier
+                                    .clip(RoundedCornerShape(SeuRadius.tag))
+                                    .background(if (selected) c.primary else c.surface)
+                                    .border(
+                                        1.dp,
+                                        if (selected) c.primary else c.border,
+                                        RoundedCornerShape(SeuRadius.tag),
+                                    )
+                                    .clickable { importCampus = cp }
+                                    .padding(horizontal = 14.dp, vertical = 8.dp),
+                            ) {
+                                Text(
+                                    cp.label,
+                                    style = t.caption,
+                                    color = if (selected) c.onPrimary else c.textSecondary,
+                                )
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "第 1 节 ${preset.first().label()} … 第 ${preset.size} 节 " +
+                            "${preset.last().label()}。这张表会持续跟随该校区预设：" +
+                            "学校日后调整作息它自动同步。导入后也能在「课表设置」里改成自定义。",
+                        style = t.caption,
+                        color = c.textTertiary,
+                    )
+
+                    Spacer(Modifier.height(16.dp))
                     SeuTextField(
                         value = boardName,
                         onValueChange = { boardName = it; nameEdited = true },
@@ -380,7 +530,7 @@ fun NewBoardPage(
                         Segmented(
                             options = listOf(false, true),
                             selected = copySettings,
-                            label = { if (it) "复制已有课表" else "用学校默认" },
+                            label = { if (it) "复制已有课表" else "跟随校区作息" },
                             onSelect = { v ->
                                 copySettings = v
                                 message = null
@@ -394,9 +544,42 @@ fun NewBoardPage(
                         Spacer(Modifier.height(10.dp))
 
                         if (!copySettings) {
+                            // 校区决定跟随哪套预设，所以得先让用户选——两校区第一节课
+                            // 相差 35 分钟，猜错会让今日页的倒计时整体偏。
+                            Row(
+                                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                PeriodTimes.Campus.entries.forEach { cp ->
+                                    val selected = blankCampus == cp
+                                    Box(
+                                        Modifier
+                                            .clip(RoundedCornerShape(SeuRadius.tag))
+                                            .background(if (selected) c.primary else c.surface)
+                                            .border(
+                                                1.dp,
+                                                if (selected) c.primary else c.border,
+                                                RoundedCornerShape(SeuRadius.tag),
+                                            )
+                                            .clickable { blankCampus = cp }
+                                            .padding(horizontal = 14.dp, vertical = 8.dp),
+                                    ) {
+                                        Text(
+                                            cp.label,
+                                            style = t.caption,
+                                            color = if (selected) c.onPrimary else c.textSecondary,
+                                        )
+                                    }
+                                }
+                            }
+                            Spacer(Modifier.height(10.dp))
+                            val preset = PeriodTimes.of(blankCampus)
                             Text(
-                                "用东南大学默认作息（13 节，第 1 节 08:00 开始，第 13 节 21:25 结束）。" +
-                                    "该表将持续跟随默认值：学校日后调整作息时它会自动同步，无需手动修改。",
+                                "第 1 节 ${preset.first().label()} … 第 ${preset.size} 节 " +
+                                    "${preset.last().label()}。" +
+                                    "这张表会持续跟随「${blankCampus.label}」预设：" +
+                                    "学校日后调整作息时它会自动同步，无需手改。" +
+                                    "建好后可在「课表设置」里改成自定义。",
                                 style = t.caption,
                                 color = c.textSecondary,
                             )
@@ -454,7 +637,7 @@ fun NewBoardPage(
                                 else -> {
                                     Text(
                                         "来源「${snap.boardName}」" +
-                                            (if (snap.custom) "：自定义作息" else "：用的是学校默认作息"),
+                                            (if (snap.custom) "：自定义作息" else "：跟随${snap.campus.label}预设"),
                                         style = t.caption,
                                         color = c.textSecondary,
                                     )
@@ -523,6 +706,7 @@ private fun ImportSection(
     onTermInput: (String) -> Unit,
     candidates: List<String>,
     currentTerm: String?,
+    notice: String?,
     querying: Boolean,
     onQuery: () -> Unit,
 ) {
@@ -534,7 +718,8 @@ private fun ImportSection(
 
     if (candidates.isEmpty()) {
         Text(
-            "无法获取当前学期（可能尚未登录，或教务接口不可用）。" +
+            // 有原因就报原因（那是可行动的），没有才退回这句笼统提示。
+            notice ?: "无法获取当前学期（可能尚未登录，或教务接口不可用）。" +
                 "也可在下方直接手动填写学期代码。",
             style = t.caption,
             color = c.textSecondary,
@@ -738,7 +923,7 @@ private fun BlankSection(
             }
             Spacer(Modifier.height(8.dp))
             Text(
-                "三个数字加起来就是一天的总节数（东南大学是 5 + 5 + 3 = 13 节）。",
+                "三个数字加起来就是一天的总节数（长安大学是 4 + 4 + 3 = 11 节）。",
                 style = t.caption,
                 color = c.textTertiary,
             )

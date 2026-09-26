@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- 启动图标底色：白底（对勾为东大绿）。 -->
+    <!-- 启动图标底色：白底（对勾为长大蓝）。 -->
     <color name="ic_launcher_background">#FFFFFF</color>
 
-    <!-- 图标前景用色 -->
-    <color name="ic_launcher_check_front">#4C7D2C</color>
-    <color name="ic_launcher_check_back">#AECB95</color>
+    <!-- 图标前景用色：长大蓝 + 其浅色变体（见 drawable/ic_launcher_foreground.xml） -->
+    <color name="ic_launcher_check_front">#133984</color>
+    <color name="ic_launcher_check_back">#ACBAD4</color>
 </resources>

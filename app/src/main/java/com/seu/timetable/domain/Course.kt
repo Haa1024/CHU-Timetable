@@ -5,22 +5,20 @@ import kotlinx.serialization.Serializable
 /**
  * 一门课程（课程级）。
  *
- * ehall 的 `xskcb.do` 一行中混合了两类属性：**一次上课**（`SKXQ` 星期 / `KSJC`·`JSJC` 节次 /
- * `JASMC` 教室，每行不同）与**课程**（`KCM` 课程名 / `SKJS` 教师 / 颜色 / 备注 / 学分，多行重复）。
- * 课程的唯一标识是 `JXBID`（教学班号）：实测「通信电子线路实验」两行 JXBID 相同，
- * 故 7 行 = 7 个时间块，却只有 6 门课。
+ * 「同一门课」的判据是**教学班号**（长安大学为 `lessonNo`，形如 `29ZY1608.01`）：
+ * 实测「水质分析」有 3 个时间块、教室各不相同，但 lessonNo 一致，故 3 块 = 1 门课。
  *
  * 拆成两层的原因：详情页与编辑页属课级操作，改颜色 / 备注必须只改一处，
  * 否则同一门课会渲染出两种颜色。拆分后「同一门课必然同色」在结构上不可能出错。
  */
 @Serializable
 data class Course(
-    val id: String,                    // JXBID 教学班号
-    val name: String,                  // KCM
-    val teacher: String = "",          // SKJS
-    val courseCode: String = "",       // KCH
-    val classNo: String = "",          // KXH
-    /** 学分。仅未排课接口 `xswpkc.do` 提供，主课表接口 `xskcb.do` 不返回，其余场景由用户填写。 */
+    val id: String,                    // 教学班号 lessonNo
+    val name: String,                  // 课程名
+    val teacher: String = "",          // 教师
+    val courseCode: String = "",       // 课程代码（由 lessonNo 去掉序号部分得到）
+    val classNo: String = "",          // 班级号（本地自建 / 导入课表可留空）
+    /** 学分。来自课表页的课程列表表；缺该表时为空，由用户自行填写。 */
     val credit: Double? = null,
     /** 用户备注 */
     val note: String = "",
@@ -29,21 +27,20 @@ data class Course(
 )
 
 /**
- * 一次上课（时间块）。一行接口数据 = 一个 CourseSession。
+ * 一次上课（时间块）。接口里一个教学活动块 = 一个 CourseSession。
  *
- * 不得依据 `YPSJDD` 文本生成 session：多段课程被后端拆成多行时该字段未随之切分，
- * 每行重复完整原文，按此解析会使块数翻倍（实测 7 块 → 9 段）。
- * 权威字段为 [dayOfWeek] + [startPeriod] + [endPeriod] + [weeks]。
+ * 权威字段为 [dayOfWeek] + [startPeriod] + [endPeriod] + [weeks]，
+ * 教室原文只作展示，**不得**由它反推时段或周次。
  */
 @Serializable
 data class CourseSession(
-    val id: String,                    // KBID + 节次，保证同一门课的两个时段不撞
+    val id: String,                    // 课程 + 星期 + 节次，保证同一门课的两个时段不撞
     val courseId: String,              // → Course.id
     val dayOfWeek: Int,                // 1=周一 … 7=周日（7 是周日，不是 0）
     val startPeriod: Int,              // 起始节次，1-based
     val endPeriod: Int,                // 结束节次，闭区间
-    val weeks: Set<Int>,               // 上课周次，1-based，来自 SKZC 位图
-    val room: String = "",             // JASMC，可能为空（实验课）→ UI 显示 "—"
+    val weeks: Set<Int>,               // 上课周次，1-based，来自周次位图
+    val room: String = "",             // 教室原文，可能为空（如实验室）→ UI 显示 "—"
 ) {
     val periodSpan: Int get() = (endPeriod - startPeriod + 1).coerceAtLeast(1)
 
@@ -56,18 +53,20 @@ data class CourseSession(
 }
 
 /**
- * 未排课的课程（如形势与政策、社会实践等）。
+ * 未排课的课程（如形势与政策、社会实践、各类实习）。
  *
- * 这类课程没有星期与节次、无法绘制进网格，但唯有此处含学分与学时——主课表接口不返回学分。
- * [weeksText] 来自本接口的 `SKZC`，为文本形式（如 `"7-14周"`），与 `xskcb.do` 中同名字段的
- * 0/1 位图含义完全不同，二者不可混用。
+ * 这类课程出现在课程列表里，却没有任何教学活动块，因此没有星期与节次、画不进网格；
+ * 但学分只在这张列表里有，丢掉就等于用户看不到学分。
+ *
+ * [weeksText] 是**文本**周次（如 `"7-14周"`），与网格用的 0/1 位图含义完全不同，
+ * 二者不可混用。
  */
 @Serializable
 data class UnplacedCourse(
     val name: String,
     val teacher: String = "",
-    val credit: Double = 0.0,          // XF
-    val hours: Int = 0,                // XS
+    val credit: Double = 0.0,          // 学分
+    val hours: Int = 0,                // 学时（长安大学 EAMS 不提供，恒为 0）
     val weeksText: String = "",        // 文本周次，不是位图
     val courseCode: String = "",
 )
@@ -99,7 +98,7 @@ fun compressWeeks(weeks: Set<Int>): String {
 /**
  * [compressWeeks] 的逆运算：将用户输入的 `"1-3,5-7,10"` 解析为周次集合。
  *
- * 自建课表须由用户手填周次（无教务 SKZC 位图可读），而 [compressWeeks] 恰好生成该格式，
+ * 自建课表须由用户手填周次（没有教务位图可读），而 [compressWeeks] 恰好生成该格式，
  * 故预填内容可原样重新解析，用户改其中一段也不会令整串失效。
  *
  * 容错（均静默跳过，不抛异常——此处接收的是键盘输入）：中英文逗号均识别；区间连接符识别
@@ -123,21 +122,6 @@ fun parseWeeks(text: String): Set<Int> {
         } else {
             seg.toIntOrNull()?.let { if (it in 1..60) out += it }
         }
-    }
-    return out
-}
-
-/**
- * 解码 `SKZC` 周次位图。
- *
- * 位图长度不固定（实测 16 与 18 均出现过，而 `cxjcs.ZZC` 恒为 18），故不可假设长度等于总周数，
- * 也不可据此做长度校验；只需按位置读取：第 i 个字符（下标自 0 起）= 第 i+1 周。
- */
-fun decodeWeekBitmap(bitmap: String?): Set<Int> {
-    if (bitmap.isNullOrEmpty()) return emptySet()
-    val out = LinkedHashSet<Int>()
-    bitmap.forEachIndexed { i, ch ->
-        if (ch == '1') out += i + 1
     }
     return out
 }

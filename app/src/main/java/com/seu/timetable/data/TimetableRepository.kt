@@ -1,6 +1,11 @@
 package com.seu.timetable.data
 
 import android.content.Context
+import com.seu.timetable.data.chu.ChuClient
+import com.seu.timetable.data.chu.ChuSemesterCalendar
+import com.seu.timetable.data.chu.ChuTimetableSource
+import com.seu.timetable.data.chu.SemesterProbe
+import com.seu.timetable.data.chu.StoredSemesterStart
 import com.seu.timetable.domain.BoardContent
 import com.seu.timetable.domain.BoardIndex
 import com.seu.timetable.domain.BoardMeta
@@ -9,6 +14,7 @@ import com.seu.timetable.domain.Course
 import com.seu.timetable.domain.CourseSession
 import com.seu.timetable.domain.MANUAL_TERM_PREFIX
 import com.seu.timetable.domain.PeriodTime
+import com.seu.timetable.domain.PeriodTimes
 import com.seu.timetable.domain.TermContext
 import com.seu.timetable.domain.Timetable
 import java.time.LocalDate
@@ -22,16 +28,58 @@ import java.time.LocalDate
  */
 class TimetableRepository(
     context: Context,
-    private val client: EhallClient = EhallClient(),
+    private val settings: SettingsStore = SettingsStore(context),
 ) {
 
     private val library = TimetableLibrary(context)
-    private val ehall = EhallTimetableSource(client)
 
-    /** 教务会话探测——导入页用它区分"要登录"和"网络坏了" */
-    suspend fun probeSession(): SessionProbe = client.probeSession()
+    /**
+     * 教务客户端。**全 App 只此一份**，不要在这里之外再 new 第二个——
+     * 它持有骨架页缓存（`ids` / 总周数），多一份就会出现
+     * 「这边说已登录、那边说没有会话」这种自相矛盾的状态。
+     */
+    private val client = ChuClient()
+
+    /** 开学日的内存快照。见 [StoredSemesterStart] 的说明 */
+    private val semesterStart = StoredSemesterStart(settings)
+
+    private val source = ChuTimetableSource(client, semesterStart)
+
+    /**
+     * 教务会话探测——导入页用它区分「要登录」和「网络坏了」。
+     *
+     * 这里**刻意不用** [ChuClient.hasSession]：那个方法为了调用方便，内部把异常压成了
+     * false，于是网络不通也会被报成「未登录」——正好是 [SessionProbe] 的三段设计要避免的
+     * 那类误判（让用户反复重登，而其实该做的是等一会儿再试）。
+     * 所以直接看骨架页本身：能解析出 `ids`，才是真的登录着。
+     */
+    suspend fun probeSession(): SessionProbe = try {
+        val sk = client.skeleton(force = true)
+        if (sk.ids != null) {
+            SessionProbe.LoggedIn("课表页返回了 ids=${sk.ids}")
+        } else {
+            SessionProbe.NotLoggedIn("课表页被换成了登录页 —— 会话已失效")
+        }
+    } catch (e: NotLoggedInException) {
+        SessionProbe.NotLoggedIn(e.message ?: "会话已失效")
+    } catch (e: Exception) {
+        SessionProbe.Failed(e.message ?: (e::class.simpleName ?: "未知错误"))
+    }
 
     suspend fun hasSession(): Boolean = client.hasSession()
+
+    /** 可用学期列表（含当前学期）。导入页据此让用户直接选，不必手敲学期代码。 */
+    suspend fun semesters(): ChuSemesterCalendar = source.semesters()
+
+    /**
+     * 当前学期，**附失败原因**。
+     *
+     * 导入页用它，是为了在拿不到学期时能说清是「没登录」还是「接口坏了 / 页面变了」——
+     * 这两种情况的下一步动作完全不同（去登录 / 手动填学期代码）。
+     * [currentTermCode] / [currentTermName] 那种「吞成 null」的形态只适合不关心原因的场合。
+     */
+    suspend fun probeSemester(): SemesterProbe = source.probeSemester()
+
 
     // ------------------------------------------------------------ 读
 
@@ -115,29 +163,51 @@ class TimetableRepository(
 
     /**
      * 从教务查一份课表（先不落盘），供导入页展示摘要后确认写入。
+     *
+     * 每次先刷新一遍开学日：用户可能刚在设置里改过，而这个值直接决定「今天第几周」。
+     *
      * @throws NotLoggedInException 会话失效，UI 应弹登录页
      * @throws TimetableException 学期查不到 / 网络出错
      */
-    suspend fun fetchFromEhall(termCode: String?): Timetable = ehall.load(termCode)
-
-    /** 当前学期代码（`dqxnxq.do`）。拿不到返回 null。 */
-    suspend fun currentTermCode(): String? = runCatching { client.currentTerm()?.termCode }.getOrNull()
-
-    /** 当前学期名（`dqxnxq.do` 的 MC），如 `2026-2027学年秋季学期` */
-    suspend fun currentTermName(): String? = runCatching { client.currentTerm()?.termName }.getOrNull()
+    suspend fun fetchTimetable(termCode: String?): Timetable {
+        semesterStart.refresh()
+        return source.load(termCode)
+    }
 
     /**
-     * 把 [fetchFromEhall] 得到的课表存为本地课表。@param name 空则用学期名，再空用学期代码。
+     * 当前学期代码，如 `2026-2027-1`。拿不到返回 null。
+     *
+     * 与 [currentTermName] 共用同一份学期列表缓存，所以连着调这两个**只会打一次接口**——
+     * 而「两个都要」正是导入页的常态。
+     */
+    suspend fun currentTermCode(): String? = source.currentSemester()?.termCode
+
+    /** 当前学期显示名，如 `2026-2027学年1学期` */
+    suspend fun currentTermName(): String? = source.currentSemester()?.displayName
+
+    /**
+     * 把 [fetchTimetable] 得到的课表存为本地课表。
+     *
+     * @param name 空则用学期名，再空用学期代码
+     * @param firstMonday 用户填的第一周周一；null = 沿用 [timetable] 里那个（服务端兜底值）。
+     *   填了就顺带记进学期设置，这个学期以后再次导入会直接取用，不必让用户重填。
      * @return 新建课表 id
      */
-    suspend fun saveImported(timetable: Timetable, name: String, termName: String? = null): String {
+    suspend fun saveImported(
+        timetable: Timetable,
+        name: String,
+        termName: String? = null,
+        firstMonday: LocalDate? = null,
+        campus: PeriodTimes.Campus = PeriodTimes.Campus.DEFAULT,
+    ): String {
         val idx = library.readIndex()
         val id = library.newId()
 
         // 学期名优先用用户填的，其次服务端给的，最后退成学期代码
         val resolvedTerm = timetable.term.copy(
             termName = termName?.trim()?.takeIf { it.isNotEmpty() }
-                ?: timetable.term.termName.ifBlank { timetable.term.termCode }
+                ?: timetable.term.termName.ifBlank { timetable.term.termCode },
+            firstMonday = firstMonday ?: timetable.term.firstMonday,
         )
 
         val finalName = name.trim().takeIf { it.isNotEmpty() }
@@ -149,7 +219,9 @@ class TimetableRepository(
             name = unique,
             source = BoardSource.EHALL,
             term = resolvedTerm,
-            // 导入课表不写 schedule（空 = 用默认作息），避免固化 13 行后无法跟随学校作息调整。
+            campus = campus.name,
+            // 不写 schedule（空 = 跟随该校区预设）：照抄 11 行会把作息钉成"自定义"，
+            // 学校日后调整该校区作息就再也跟不上。
             schedule = emptyList(),
             sourceTermCode = resolvedTerm.termCode,
             lastImportAt = now(),
@@ -162,13 +234,17 @@ class TimetableRepository(
             BoardContent(timetable.courses, timetable.sessions, timetable.unplaced),
         )
         library.writeIndex(idx.copy(boards = idx.boards + meta, activeId = id))
+        // 只在用户**明确填过**时才记：没填时那个值是兜底（"本周即第 1 周"），
+        // 把兜底当作用户的意思存下来，下次会以讹传讹。
+        if (firstMonday != null) settings.setSemesterStart(resolvedTerm.termCode, firstMonday)
         return id
     }
 
     /**
      * 新建空白课表（自建），内容为空，课程由用户在 App 内添加。
      * @param firstMonday 第一周周一，自建课表也需它才能推算周次。
-     * @param schedule 作息；空 = 用学校默认。沿用他表时用 [copySettingsFrom] 取来再传入。
+     * @param campus 校区，决定 [schedule] 为空时跟随哪套作息预设。
+     * @param schedule 自定义作息；**空 = 跟随 [campus] 那套预设**（沿用他表时用 [settingsOf] 取来再传入）。
      * @param copiedFrom 作息复制来源课表名（仅展示）。
      */
     suspend fun createBlank(
@@ -176,9 +252,10 @@ class TimetableRepository(
         firstMonday: LocalDate,
         totalWeeks: Int,
         lastTeachingWeek: Int = totalWeeks,
-        morningPeriods: Int = 5,
-        afternoonPeriods: Int = 5,
+        morningPeriods: Int = 4,
+        afternoonPeriods: Int = 4,
         eveningPeriods: Int = 3,
+        campus: PeriodTimes.Campus = PeriodTimes.Campus.DEFAULT,
         schedule: List<PeriodTime> = emptyList(),
         copiedFrom: String? = null,
     ): String {
@@ -203,6 +280,7 @@ class TimetableRepository(
             name = uniqueName(label, idx.boards.map { it.name }),
             source = BoardSource.MANUAL,
             term = term,
+            campus = campus.name,
             schedule = schedule,
             copiedFrom = copiedFrom,
             createdAt = now(),
@@ -306,25 +384,76 @@ class TimetableRepository(
         return true
     }
 
+    /**
+     * 修改**第一周周一**（整张课表的时间原点），并把这天记进学期设置。
+     *
+     * ## 为什么不受 [saveTermConfig] 那道「仅自建课表」的限制
+     *
+     * 那道限制的理由是"导入课表的骨架来自服务端，本地改即假数据"——它对旧学校的接口成立
+     * （那里确实下发学期起始日期），**对长安大学不成立**：EAMS 没有任何接口给出学期起止日期
+     * （技能 §9.2）。导入表的 `firstMonday` 同样只是个兜底值（"把本周当第 1 周"），
+     * 不修正就让整张表的周次静默偏掉，比"本地改"错得多。
+     *
+     * ## 为什么连同类学期的其它课表一起改
+     *
+     * 开学日是**学期**的属性，不是某张课表的属性：两张同学期的表给出不同周次是自相矛盾，
+     * 而非"互不影响的独立设置"。（作息则相反，按表存是有意的——见 [savePeriod]。）
+     *
+     * 同时写进 [SettingsStore]：这张表立即生效，且该学期**以后再次导入/同步**时直接取用
+     * （[StoredSemesterStart] 读的就是它），不必让用户重填一遍。
+     */
+    suspend fun setFirstMonday(id: String, firstMonday: LocalDate) {
+        val idx = library.readIndex()
+        val target = idx.meta(id) ?: return
+        val termCode = target.term.termCode
+
+        library.writeIndex(
+            idx.copy(
+                boards = idx.boards.map {
+                    // 自建表的 termCode 是 `manual-xxx` 哨兵，天然不会与真实学期撞上
+                    if (it.id == id || (termCode.isNotBlank() && it.term.termCode == termCode)) {
+                        it.copy(term = it.term.copy(firstMonday = firstMonday), updatedAt = now())
+                    } else {
+                        it
+                    }
+                }
+            )
+        )
+
+        if (termCode.isNotBlank() && !termCode.startsWith(MANUAL_TERM_PREFIX)) {
+            settings.setSemesterStart(termCode, firstMonday)
+        }
+    }
+
     // ------------------------------------------------------------ 作息时间
 
     /**
-     * 保存本张课表的作息；空 list = 恢复默认作息（非「无作息」）。
+     * 保存**校区 + 作息**——这两件事必须一起写。
+     *
+     * 校区决定"跟随哪套预设"，而"是否自定义"由 [custom] 是否为空表示；
+     * 分两次写会留下"校区已经换了、作息还指着旧那套"的中间态（进程被杀就真落盘了）。
+     *
      * 仅改 [id] 这一张，其它课表不动；沿用他表时用 [settingsOf] 取来再调用，复制即一次性独立。
-     * @param copiedFrom 复制来源课表名（仅展示）；恢复默认时清空。
+     *
+     * @param custom 自定义的那些行；**传 null 或空表示跟随 [campus] 的预设**，
+     *   而不是"没有作息"——学校日后调整该校区作息时它会自动跟上。
+     * @param copiedFrom 复制来源课表名（仅展示）；跟随预设时无来源可言，会被清空。
      */
-    suspend fun saveSchedule(
+    suspend fun savePeriod(
         id: String,
-        times: List<PeriodTime>,
+        campus: PeriodTimes.Campus,
+        custom: List<PeriodTime>?,
         copiedFrom: String? = null,
     ) {
         val idx = library.readIndex()
         val old = idx.meta(id) ?: return
+        val times = custom.orEmpty()
         library.writeIndex(
             idx.copy(
                 boards = idx.boards.map {
                     if (it.id == id) {
                         old.copy(
+                            campus = campus.name,
                             schedule = times,
                             copiedFrom = if (times.isEmpty()) null else copiedFrom,
                             updatedAt = now(),
@@ -336,9 +465,6 @@ class TimetableRepository(
             )
         )
     }
-
-    /** 恢复默认作息（SEU 13 节）。只影响这一张课表。 */
-    suspend fun resetSchedule(id: String) = saveSchedule(id, emptyList(), copiedFrom = null)
 
     /**
      * 是否在周网格里显示非本周课程（半透明影子块）。
@@ -360,9 +486,9 @@ class TimetableRepository(
     /**
      * 读一张课表的可复制设置，供「从其它课表导入设置」用。
      *
-     * 不只返回作息数值，还要带出「来源是否在用学校默认」：
-     * 来源用默认时 [scheduleToApply] 返回空 list，新表同样记为「用默认」，
-     * 以后学校调整作息两张表会一起跟上；来源自定义过才真抄那 13 行数值。
+     * 不只返回作息数值，还要带出「来源是否在用预设」与**哪个校区**：
+     * 来源用预设时 [SettingsSnapshot.scheduleToApply] 返回 null，新表同样记为「跟随那套预设」，
+     * 以后学校调整作息两张表会一起跟上；来源自定义过才真抄那些数值。
      * 若一律抄数值，复制出来的表都会变成「自定义」而与学校默认脱钩。
      */
     suspend fun settingsOf(id: String): SettingsSnapshot? {
@@ -370,6 +496,7 @@ class TimetableRepository(
         return SettingsSnapshot(
             boardName = meta.name,
             custom = meta.hasCustomSchedule,
+            campus = meta.campusOf,
             schedule = meta.periodSchedule.times,
             morningPeriods = meta.term.morningPeriods,
             afternoonPeriods = meta.term.afternoonPeriods,
@@ -386,12 +513,13 @@ class TimetableRepository(
      * 自动同步会将其静默冲掉，表现为「我改的东西自己变回去了」。
      * 覆盖时按课程配对保留教务不提供的本地属性（[Course.colorOverride] / [Course.credit] /
      * [Course.note]），否则用户挑的颜色会在一次同步后无提示地变回自动分配。
-     * 配对键先按 [Course.id]（即 JXBID），再退到 `课程号 + 课序号`——教务重排教学班时 JXBID 会变。
+     * 配对键先按 [Course.id]，再退到 `课程号 + 课序号`——教务重排教学班时 id 会变。
      *
-     * 学期骨架（第一周周一 / 总周数 / 节次分组）来自 `cxjcs.do`，按服务端刷新；
-     * 作息时间不动（接口不提供时刻），课表名也不改（那是用户起的）。
+     * 学期骨架里**只有总周数来自服务端**（骨架页的 `startWeek` 下拉，或位图里出现过的最大周次）；
+     * 第一周周一来自用户设置（见 [StoredSemesterStart]），因为教务接口根本不提供学期起止日期。
+     * 作息时间同样不动（接口不提供时刻），课表名也不改（那是用户起的）。
      */
-    suspend fun syncFromEhall(boardId: String): SyncOutcome {
+    suspend fun syncFromServer(boardId: String): SyncOutcome {
         val idx = library.readIndex()
         val meta = idx.meta(boardId) ?: return SyncOutcome.Failed("这张课表已经不存在了。")
 
@@ -401,7 +529,8 @@ class TimetableRepository(
             )
 
         val fresh = try {
-            ehall.load(termCode)
+            semesterStart.refresh()
+            source.load(termCode)
         } catch (e: NotLoggedInException) {
             // 交给 UI 去弹登录页——同步是个用户显式发起的动作，值得为它走一次认证
             return SyncOutcome.NeedLogin
@@ -532,27 +661,32 @@ sealed interface SyncOutcome {
 /**
  * 一张课表里可被复制过去的那部分设置。
  *
- * 只含作息时间与节次分组，不含第一周周一 / 总周数——后两者属于「这个学期」，
+ * 只含校区、作息与节次分组，不含第一周周一 / 总周数——后两者属于「这个学期」，
  * 换一张课表就是另一个学期，抄过去反而是错的。
  *
- * 用法：`repo.saveSchedule(目标id, snap.scheduleToApply, snap.copiedFromLabel)`。
+ * 用法：`repo.savePeriod(目标id, snap.campus, snap.scheduleToApply, snap.copiedFromLabel)`。
  */
 data class SettingsSnapshot(
     val boardName: String,
     /** 来源那张表是否自定义过作息 */
     val custom: Boolean,
-    /** 生效的作息值（来源没自定义时就是学校默认的 13 行，供界面预览） */
+    /**
+     * 来源的校区。**必须随作息一起抄**：作息值与校区本就绑定，
+     * 只抄时刻不抄校区会得到"渭水的时刻表 + 南校区的标签"这种自相矛盾的组合。
+     */
+    val campus: PeriodTimes.Campus,
+    /** 生效的作息值（来源没自定义时就是该校区预设的 11 行，供界面预览） */
     val schedule: List<PeriodTime>,
     val morningPeriods: Int,
     val afternoonPeriods: Int,
     val eveningPeriods: Int,
 ) {
     /**
-     * 应写进目标课表的作息。来源在用学校默认时返回空 list（而非 13 行数值）：
-     * 空 list 的语义是「跟随学校默认」，两张表以后会一起跟上学校调整。
+     * 应写进目标课表的**自定义**作息。来源在用预设时返回 null（而非 11 行数值）：
+     * null 的语义是「跟随 [campus] 那套预设」，两张表以后会一起跟上学校调整。
      */
-    val scheduleToApply: List<PeriodTime> get() = if (custom) schedule else emptyList()
+    val scheduleToApply: List<PeriodTime>? get() = if (custom) schedule else null
 
-    /** 写进 [BoardMeta.copiedFrom] 的来源名；用默认时没有"抄自哪里"可言，返回 null */
+    /** 写进 [BoardMeta.copiedFrom] 的来源名；用预设时没有"抄自哪里"可言，返回 null */
     val copiedFromLabel: String? get() = if (custom) boardName else null
 }

@@ -19,6 +19,53 @@ import androidx.compose.ui.unit.sp
 /** 主题模式。规格 4.5「外观」分段控件用。 */
 enum class ThemeMode { SYSTEM, LIGHT, DARK }
 
+/**
+ * 配色主题（主色系）。与 [ThemeMode]（亮暗）是两个正交的维度，在「我的 → 外观」里各占一行。
+ *
+ * 为什么每套配色都要给全量 token，而不是只换一个 primary：
+ * 这套界面的中性色（页面底色、描边、主色浅底）都是**跟着主色冷暖走的**。
+ * 只换 primary 会得到"绿底蓝按钮"的割裂界面——底色偏绿、按钮偏蓝，
+ * 单看每一处都不算错，合起来就是脏。
+ */
+enum class Palette(val label: String) {
+    /**
+     * 默认。色值取自长安大学官网现行主色，**与桌面图标同色**——
+     * 第一眼打开就有"这是我的学校那套"的感觉，不至于图标是蓝的、界面是绿的。
+     */
+    CHU("长大蓝"),
+
+    /**
+     * 东南大学 VI 标准绿（CMYK 70/30/100/20 → #4C7D2C）。
+     *
+     * 本项目与 SEU 课表同源（同一作者的两个版本），这套绿是那套界面的原色，
+     * 所以如实叫「东大绿」——原先那个"经典绿"既没说明是什么绿，日后也无从考证出处。
+     * 不再作为默认（默认见 [DEFAULT]）。
+     */
+    GREEN("东大绿"),
+    ;
+
+    companion object {
+        /** 未配置时用哪个。枚举里放第一位，是为了让分段控件的默认项就在最左边。 */
+        val DEFAULT = CHU
+    }
+}
+
+/**
+ * 把持久化的枚举名还原成枚举值；认不出的脏值一律回退默认，不抛异常。
+ *
+ * ## 为什么要抽成函数而不是各处 runCatching
+ *
+ * 需要主题的地方**不止一处**：主界面一处、登录页一处（登录页是最先看到的一屏，
+ * 不跟着走会最扎眼）。各写一份解析，就各有一份"回退到哪"的答案——而这种不一致
+ * 只表现为"某个页面颜色不对"，查起来毫无线索。规则只该有一份。
+ */
+fun themeModeOf(name: String?): ThemeMode =
+    name?.let { runCatching { ThemeMode.valueOf(it) }.getOrNull() } ?: ThemeMode.SYSTEM
+
+/** 见 [themeModeOf]。 */
+fun paletteOf(name: String?): Palette =
+    name?.let { runCatching { Palette.valueOf(it) }.getOrNull() } ?: Palette.DEFAULT
+
 // ---------------------------------------------------------------------------
 // 颜色 token（规格 2.1）
 //
@@ -44,12 +91,10 @@ data class SeuColors(
 )
 
 /**
- * 主色：东大绿，即东南大学 VI 规范 A5-1 的标准主色，
- * CMYK(70,30,100,20) → RGB(76,125,44) → #4C7D2C。
+ * 【东大绿 · 浅色】
  *
- * 浅色主题直接采用官方值，白底上作按钮与胶囊填充对比度充足；
- * 深色主题改用提亮变体 #6EA64C，原值在深底上会显得发闷。
- * 页面底色与描边同步由蓝灰调改为绿灰调，使中性色系与主色冷暖一致。
+ * 主色 CMYK(70,30,100,20) → RGB(76,125,44) → #4C7D2C，白底上作按钮与胶囊填充对比度充足。
+ * 页面底色与描边取绿灰调，使中性色系与主色冷暖一致——这是 [Palette] 注释里那条规矩的由来。
  */
 val LightSeuColors = SeuColors(
     bg = Color(0xFFF2F5F0),
@@ -59,8 +104,8 @@ val LightSeuColors = SeuColors(
     textPrimary = Color(0xFF14171A),
     textSecondary = Color(0xFF707580),
     textTertiary = Color(0xFFA1A6B0),
-    primary = Color(0xFF4C7D2C),     // 东大绿（官方标准色）
-    primarySoft = Color(0xFFEFF4E9), // 东大绿冲淡到贴近白底
+    primary = Color(0xFF4C7D2C),
+    primarySoft = Color(0xFFEFF4E9),
     onPrimary = Color(0xFFFFFFFF),
     danger = Color(0xFFD93B3B),
     success = Color(0xFF1F9E54),
@@ -68,8 +113,11 @@ val LightSeuColors = SeuColors(
 )
 
 /**
- * 深色主题。注意 `surfaceSunken` 必须比 `surface` 更暗（`#0A0B0D` < `#171A1F`），
+ * 【东大绿 · 深色】
+ *
+ * 注意 `surfaceSunken` 必须比 `surface` 更暗（`#0A0B0D` < `#171A1F`），
  * 否则分段控件的选中态无法辨认。
+ * 主色改用提亮变体 #6EA64C，原值在深底上会显得发闷。
  */
 val DarkSeuColors = SeuColors(
     bg = Color(0xFF0D0F12),
@@ -79,13 +127,66 @@ val DarkSeuColors = SeuColors(
     textPrimary = Color(0xFFF2F2F7),
     textSecondary = Color(0xFF99A1AD),
     textTertiary = Color(0xFF6B7380),
-    primary = Color(0xFF6EA64C),     // 东大绿的深色变体：提亮，否则深底上发闷
-    primarySoft = Color(0xFF1D2B15), // 东大绿压暗到贴近深底
+    primary = Color(0xFF6EA64C),
+    primarySoft = Color(0xFF1D2B15),
     onPrimary = Color(0xFFFFFFFF),
     danger = Color(0xFFF26363),
     success = Color(0xFF4ADE80),
     isDark = true,
 )
+
+/**
+ * 【长大蓝 · 浅色】
+ *
+ * 主色 #133984：学校官网主色，抓取全站 CSS 后它出现 33 次，是第二名色值的 3 倍以上，
+ * 用于站内链接与导航底色，可认为即官方现行主色。
+ *
+ * 中性色系整体改为蓝灰调。这不是审美偏好：底色若仍留在绿灰上，
+ * 与蓝色按钮并置会显出脏黄，而单看每一处都"不像有问题"，排查时极难定位。
+ */
+val LightChuColors = SeuColors(
+    bg = Color(0xFFF1F3F8),
+    surface = Color(0xFFFFFFFF),
+    surfaceSunken = Color(0xFFF9FAFD),
+    border = Color(0xFFE4E8F1),
+    textPrimary = Color(0xFF14171A),
+    textSecondary = Color(0xFF707580),
+    textTertiary = Color(0xFFA1A6B0),
+    primary = Color(0xFF133984),
+    primarySoft = Color(0xFFEBEFF8),
+    onPrimary = Color(0xFFFFFFFF),
+    danger = Color(0xFFD93B3B),
+    success = Color(0xFF1F9E54),
+    isDark = false,
+)
+
+/**
+ * 【长大蓝 · 深色】
+ *
+ * 主色提到 #5B7FC7：原值 #133984 本身已经很暗，压在深底上几乎与背景糊在一起，
+ * 按钮会看不出边界。提亮是深色主题下对深色主色的通用处理，与东大绿的 #6EA64C 同一手法。
+ */
+val DarkChuColors = SeuColors(
+    bg = Color(0xFF0D0F14),
+    surface = Color(0xFF171A21),
+    surfaceSunken = Color(0xFF0A0B0F),
+    border = Color(0xFF262C3A),
+    textPrimary = Color(0xFFF2F2F7),
+    textSecondary = Color(0xFF99A1AD),
+    textTertiary = Color(0xFF6B7380),
+    primary = Color(0xFF5B7FC7),
+    primarySoft = Color(0xFF16203A),
+    onPrimary = Color(0xFFFFFFFF),
+    danger = Color(0xFFF26363),
+    success = Color(0xFF4ADE80),
+    isDark = true,
+)
+
+/** 取某套配色、某个亮暗下的 token。认不出的组合回退到默认配色，不抛异常。 */
+fun colorsOf(palette: Palette, dark: Boolean): SeuColors = when (palette) {
+    Palette.GREEN -> if (dark) DarkSeuColors else LightSeuColors
+    Palette.CHU -> if (dark) DarkChuColors else LightChuColors
+}
 
 val LocalSeuColors = staticCompositionLocalOf { LightSeuColors }
 
@@ -228,6 +329,7 @@ object SeuDimens {
 @Composable
 fun SeuTheme(
     themeMode: ThemeMode = ThemeMode.SYSTEM,
+    palette: Palette = Palette.DEFAULT,
     content: @Composable () -> Unit,
 ) {
     val dark = when (themeMode) {
@@ -235,7 +337,7 @@ fun SeuTheme(
         ThemeMode.LIGHT -> false
         ThemeMode.DARK -> true
     }
-    val colors = if (dark) DarkSeuColors else LightSeuColors
+    val colors = colorsOf(palette, dark)
 
     // MaterialTheme 只用来给 Text/Icon/Scaffold 之类的默认值兜底；
     // 本项目外观全部走 LocalSeuColors，不依赖 Material 的语义色。

@@ -19,6 +19,8 @@ import java.time.LocalTime
  * 存储为 ISO-8601 文本（`2026-09-21` / `08:00`）而非时间戳，理由有二：
  *   1. 人类可直接阅读——本地存储为 JSON，出现问题时用 adb 拉取即可肉眼核对；
  *   2. 无时区歧义——课表的"第一周周一"是一个纯日期，不应被时区规则左右。
+ *
+ * 与学校无关：换教务系统不影响这两个序列化器。
  */
 object LocalDateSerializer : KSerializer<LocalDate> {
     override val descriptor: SerialDescriptor =

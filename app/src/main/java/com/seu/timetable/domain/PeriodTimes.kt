@@ -7,13 +7,12 @@ import java.time.LocalTime
 /**
  * 一节课的起止时刻。
  *
- * 该表必须由人工确认，接口不提供。
- * ehall 的全部接口仅给出「上午 / 下午 / 晚上」的分组（`cxjcs.do` 的 `SFJJ/XFJJ/WSJJ`），
- * 无任何「第 1 节 08:00」之类的时刻——已逐条核查 78 条真实请求的 JS，确认不存在。
- * 因此今日页的倒计时、课内进度条与上课提醒，均依赖这张本地配置表。
+ * 该表必须由人工确认，接口不提供——长安大学的 EAMS 前端与接口**都没有**「第 N 节几点几分」
+ * 这类数据（全站搜索作息/上课时间/节次时间，0 命中）。因此今日页的倒计时、
+ * 课内进度条与上课提醒，全部依赖这张本地配置表。
  *
  * 作息时间表现已随课表一同存储在本地（自建课表允许用户自行填写），
- * 故本层亦需可序列化。`LocalTime` 需要自定义序列化器（见 SeuSerializers.kt）。
+ * 故本层亦需可序列化。`LocalTime` 需要自定义序列化器（见 Serializers.kt）。
  */
 @Serializable
 data class PeriodTime(
@@ -38,37 +37,107 @@ data class PeriodTime(
 }
 
 /**
- * 作息时间表。
+ * 作息时间表的各套预设。
  *
- * 默认值为东南大学实际作息（2026-09-23 由用户提供并逐条确认），
- * 非推测所得，亦非设计稿中的占位示例。
+ * ## 为什么是「多套」而不是一套
  *
- * 结构规律（可用于自查是否抄错）：每节 45 分钟，节间休息 5 分钟；
- * 第 2 节后与第 7 节后各休息 15 分钟；午休 1 小时 45 分，晚休 45 分钟。
+ * 长安大学的作息**逐校区不同**，而且差别不小——第一节课南校区 8:00、渭水校区 8:35，
+ * 上午整体差 35 分钟。这不是可以忽略的误差：填错校区，今日页的「距上课还有 N 分钟」
+ * 与上课提醒会整体偏半小时以上，而课表网格本身看起来完全正常（它只关心节次），
+ * 于是用户很难意识到是设置错了。
  *
- * 13 节 = 上午 1-5 + 下午 6-10 + 晚上 11-13，
- * 与接口 `cxjcs.do` 返回的 `SFJJ=5 / XFJJ=5 / WSJJ=3` 完全吻合
- * （两个独立来源互相印证）。
+ * [Campus.DEFAULT] 目前是南校区。界面给用户选校区的入口见 [of]——
+ * 之所以先把两套都编码进来，是因为一旦按错的那套显示过一次，用户没法自己判断对错。
+ *
+ * ## 共同的结构规律（可用于自查是否抄错）
+ *
+ * 上午 4 节 / 下午 4 节 / 晚上 3 节 = **11 节**，与 EAMS 网格的 11 行吻合
+ * （`unitCount = 11`——实测第 11 节真的有课，它不是一行永远空着的填充行）。
+ *
+ * 节长：除南校区第 11 节为 50 分钟（20:45–21:35）外，其余各节一律 **45 分钟**。
+ * 「每节都该是 45 分钟」是最省事的抄录自查点。
+ *
+ * 课间：**两校区都不是"一律 5 分钟"**。每个半天内分两个"大节"，
+ * 大节内部各小节之间隔 5～10 分钟，两个大节之间隔 15～30 分钟。逐校区看：
+ *
+ *   - 南校区：小节间隔 10 分钟；第 2 节后 30 分钟（课间活动）、第 6 节后 20 分钟；
+ *     例外是第 10 → 11 节之间只有 5 分钟。
+ *   - 渭水：小节间隔 5 分钟；第 2 节后与第 6 节后各 15 分钟。
+ *
+ * 另有跨午休（第 4 → 5 节）与跨晚休（第 8 → 9 节）两个长间隔。单测把上述节律逐段钉住——
+ * 抄错时单看每一行都正常，只有把相邻行连起来才看得出来。
  */
 object PeriodTimes {
 
-    val SEU: List<PeriodTime> = listOf(
+    /** 长安大学的校区。作息逐校区不同，故它必须是一个显式选择而不是"猜"。 */
+    enum class Campus(val label: String) {
+        /** 校本部 / 南校区。官网「作息时间」页现行版本 */
+        NAN("南校区（本部）"),
+
+        /** 渭水校区 */
+        WEISHUI("渭水校区"),
+        ;
+
+        companion object {
+            /** 未配置时用哪个。选它的理由：官网现行版本，且来源最新的页面就是南校区那个 */
+            val DEFAULT = NAN
+
+            /** 从持久化的名字还原；认不出就退回 [DEFAULT]，不要让一个脏值把界面弄崩。 */
+            fun byName(name: String?): Campus = entries.firstOrNull { it.name == name } ?: DEFAULT
+        }
+    }
+
+    /**
+     * 南校区（本部）作息，11 节。
+     *
+     * 前 10 节取自学校官网「作息时间」页（南校区管理办公室 `nxqb.chd.edu.cn/xqfw/zxsj.htm`）；
+     * 第 11 节官网未列，由用户补全（20:45–21:35）。
+     *
+     * 课间：第 2 节后 30 分钟（课间活动）、第 6 节后 20 分钟（课间休息）；
+     * 午休 11:50–14:00，晚休 17:40–19:00。
+     */
+    val CHU_NAN: List<PeriodTime> = listOf(
         PeriodTime(1, LocalTime.of(8, 0), LocalTime.of(8, 45)),
-        PeriodTime(2, LocalTime.of(8, 50), LocalTime.of(9, 35)),
-        PeriodTime(3, LocalTime.of(9, 50), LocalTime.of(10, 35)),
-        PeriodTime(4, LocalTime.of(10, 40), LocalTime.of(11, 25)),
-        PeriodTime(5, LocalTime.of(11, 30), LocalTime.of(12, 15)),
-        PeriodTime(6, LocalTime.of(14, 0), LocalTime.of(14, 45)),
-        PeriodTime(7, LocalTime.of(14, 50), LocalTime.of(15, 35)),
-        PeriodTime(8, LocalTime.of(15, 50), LocalTime.of(16, 35)),
-        PeriodTime(9, LocalTime.of(16, 40), LocalTime.of(17, 25)),
-        PeriodTime(10, LocalTime.of(17, 30), LocalTime.of(18, 15)),
-        PeriodTime(11, LocalTime.of(19, 0), LocalTime.of(19, 45)),
-        PeriodTime(12, LocalTime.of(19, 50), LocalTime.of(20, 35)),
-        PeriodTime(13, LocalTime.of(20, 40), LocalTime.of(21, 25)),
+        PeriodTime(2, LocalTime.of(8, 55), LocalTime.of(9, 40)),
+        PeriodTime(3, LocalTime.of(10, 10), LocalTime.of(10, 55)),
+        PeriodTime(4, LocalTime.of(11, 5), LocalTime.of(11, 50)),
+        PeriodTime(5, LocalTime.of(14, 0), LocalTime.of(14, 45)),
+        PeriodTime(6, LocalTime.of(14, 55), LocalTime.of(15, 40)),
+        PeriodTime(7, LocalTime.of(16, 0), LocalTime.of(16, 45)),
+        PeriodTime(8, LocalTime.of(16, 55), LocalTime.of(17, 40)),
+        PeriodTime(9, LocalTime.of(19, 0), LocalTime.of(19, 45)),
+        PeriodTime(10, LocalTime.of(19, 55), LocalTime.of(20, 40)),
+        PeriodTime(11, LocalTime.of(20, 45), LocalTime.of(21, 35)),
     )
 
-    val default: List<PeriodTime> get() = SEU
+    /**
+     * 渭水校区作息，11 节。
+     *
+     * 前 10 节取自校区作息表文档；第 11 节由用户补全（20:40–21:25）。
+     * 全天每节都是 45 分钟、节间 5 分钟，规律性比南校区还好，可作为抄录是否出错的对照。
+     */
+    val CHU_WEISHUI: List<PeriodTime> = listOf(
+        PeriodTime(1, LocalTime.of(8, 35), LocalTime.of(9, 20)),
+        PeriodTime(2, LocalTime.of(9, 25), LocalTime.of(10, 10)),
+        PeriodTime(3, LocalTime.of(10, 25), LocalTime.of(11, 10)),
+        PeriodTime(4, LocalTime.of(11, 15), LocalTime.of(12, 0)),
+        PeriodTime(5, LocalTime.of(14, 25), LocalTime.of(15, 10)),
+        PeriodTime(6, LocalTime.of(15, 15), LocalTime.of(16, 0)),
+        PeriodTime(7, LocalTime.of(16, 15), LocalTime.of(17, 0)),
+        PeriodTime(8, LocalTime.of(17, 5), LocalTime.of(17, 50)),
+        PeriodTime(9, LocalTime.of(19, 0), LocalTime.of(19, 45)),
+        PeriodTime(10, LocalTime.of(19, 50), LocalTime.of(20, 35)),
+        PeriodTime(11, LocalTime.of(20, 40), LocalTime.of(21, 25)),
+    )
+
+    /** 某个校区的作息。界面上的「选校区」即调它。 */
+    fun of(campus: Campus): List<PeriodTime> = when (campus) {
+        Campus.NAN -> CHU_NAN
+        Campus.WEISHUI -> CHU_WEISHUI
+    }
+
+    /** 学校默认作息。空 schedule 的课表都跟随它（见 `BoardMeta.periodSchedule`）。 */
+    val default: List<PeriodTime> get() = of(Campus.DEFAULT)
 }
 
 /** 课程当前状态。今日页的文案与配色都按它分档。 */
@@ -77,7 +146,7 @@ enum class SessionStatus { UPCOMING, ONGOING, FINISHED }
 /**
  * 作息表的查询封装。用户可以改（设置页），所以做成类而不是直接读 object。
  */
-class PeriodSchedule(val times: List<PeriodTime> = PeriodTimes.SEU) {
+class PeriodSchedule(val times: List<PeriodTime> = PeriodTimes.default) {
 
     private val byPeriod: Map<Int, PeriodTime> = times.associateBy { it.index }
 
@@ -139,9 +208,17 @@ class PeriodSchedule(val times: List<PeriodTime> = PeriodTimes.SEU) {
         .minByOrNull { beginOf(it.startPeriod)!! }
 
     /**
-     * 自查作息表是否录入错误。人工抄录 13 行时间极易出现"结束早于开始"之类的笔误
-     * （确曾发生：2026-09-23 用户提供的版本中第 9 节写为 `16:40 – 15:25`）。
+     * 自查作息表是否录入错误。人工抄录 11 行时间极易出现"结束早于开始"之类的笔误。
      * 单元测试会执行该函数，将笔误拦截在发布之前。
+     *
+     * ## 这里**刻意不校验**「每节 45 分钟」「第 N 节后休息 M 分钟」
+     *
+     * 这两条都是**逐校、甚至逐校区而定**的：长安大学的南校区与渭水校区作息就不同，
+     * 节间间隔也不同（南校区第 2 节后 30 分钟、第 6 节后 20 分钟；渭水则一律 5 分钟），
+     * 南校区第 11 节还是 50 分钟。写死任何一套规则，用户一改作息就会被误报"有问题"。
+     *
+     * 所以只保留**与学校无关的结构性检查**：节次连续、时间不倒流、不重叠，
+     * 以及一个宽松的时长上限（用来抓"某一行的结束时刻填到了另一行"这种量级的笔误）。
      */
     fun problems(): List<String> {
         val out = ArrayList<String>()
@@ -150,21 +227,24 @@ class PeriodSchedule(val times: List<PeriodTime> = PeriodTimes.SEU) {
         sorted.forEachIndexed { i, t ->
             if (t.index != i + 1) out += "节次不连续：第 ${i + 1} 个位置的 index 是 ${t.index}"
             if (t.end <= t.begin) out += "第 ${t.index} 节结束不晚于开始：${t.begin} – ${t.end}"
-            if (t.durationMinutes() != 45L) {
-                out += "第 ${t.index} 节时长 ${t.durationMinutes()} 分钟（本校作息应为 45 分钟）"
+            if (t.durationMinutes() > MAX_PERIOD_MINUTES) {
+                out += "第 ${t.index} 节时长 ${t.durationMinutes()} 分钟，" +
+                    "超过 $MAX_PERIOD_MINUTES 分钟 —— 多半是把结束时刻填错了"
             }
         }
         sorted.zipWithNext { a, b ->
             if (b.begin < a.end) out += "第 ${a.index} 节与第 ${b.index} 节时间重叠"
-            if (a.index == 2 || a.index == 7) {
-                val gap = Duration.between(a.end, b.begin).toMinutes()
-                if (gap != 15L) out += "第 ${a.index} 节后应休息 15 分钟，实际 $gap 分钟"
-            }
         }
         return out
     }
 
     companion object {
+        /**
+         * 单节时长的合理上限。取 180 分钟而非"等于 45"：不同校区、不同学校的节长本就不同，
+         * 这条只负责拦住明显不合理的值。
+         */
+        private const val MAX_PERIOD_MINUTES = 180L
+
         /**
          * 安全构造入口，供用户输入/设置使用。
          * 不合法时返回 null，而非像 [PeriodTime] 的 init 那样抛出异常——
@@ -179,7 +259,7 @@ class PeriodSchedule(val times: List<PeriodTime> = PeriodTimes.SEU) {
         /**
          * 作息时间编辑页的整表校验入口。
          *
-         * 返回 `Result` 而非 `null` 的原因：用户修改的是 13 行 × 2 个输入框，
+         * 返回 `Result` 而非 `null` 的原因：用户修改的是 11 行 × 2 个输入框，
          * 一旦某处有误，必须能说明"是哪一行、错在何处"，否则用户只能逐行猜测。
          * 此处将首个出错的行转换为可读信息并置入异常消息。
          */

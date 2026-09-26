@@ -1,6 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">SEU 课表</string>
+    <!--
+      应用名（桌面图标下显示的那个）。改了它，必须同步改 util/AppIdentity.DISPLAY_NAME——
+      代码里有多处文案要引导用户去「系统设置 → 应用 → 这个名字」找本应用，对不上就找不到。
+    -->
+    <string name="app_name">CHU课表(友友版)</string>
 
     <!-- 桌面小组件 -->
     <string name="widget_today_2x2_name">今日课程</string>

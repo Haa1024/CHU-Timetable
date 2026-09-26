@@ -45,9 +45,12 @@ import com.seu.timetable.ui.guide.GuideTargetKey
 import com.seu.timetable.ui.guide.guideTarget
 import com.seu.timetable.ui.theme.LocalSeuColors
 import com.seu.timetable.ui.theme.LocalSeuType
+import com.seu.timetable.ui.theme.Palette
 import com.seu.timetable.ui.theme.ThemeMode
 import com.seu.timetable.update.UpdateFlow
+import com.seu.timetable.util.AppLinks
 import com.seu.timetable.util.DebugLog
+import com.seu.timetable.util.openInBrowser
 import com.seu.timetable.widget.WidgetGuidance
 import com.seu.timetable.widget.WidgetPin
 import com.seu.timetable.widget.WidgetVendor
@@ -74,6 +77,8 @@ import kotlinx.coroutines.launch
 fun ProfilePage(
     themeMode: ThemeMode,
     onThemeModeChange: (ThemeMode) -> Unit,
+    themePalette: Palette,
+    onThemePaletteChange: (Palette) -> Unit,
     accountSubtitle: String,
     onOpenAccount: () -> Unit,
     /**
@@ -148,7 +153,7 @@ fun ProfilePage(
                 }
                 Spacer(Modifier.size(14.dp))
                 Column {
-                    Text("东南大学", style = t.navTitle, color = c.textPrimary)
+                    Text("长安大学", style = t.navTitle, color = c.textPrimary)
                     Spacer(Modifier.height(5.dp))
                     Text(
                         when (sessionOk) {
@@ -239,7 +244,22 @@ fun ProfilePage(
                         modifier = Modifier.fillMaxWidth(),
                     )
                 }
-                Spacer(Modifier.height(11.dp))
+                Spacer(Modifier.height(14.dp))
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 11.dp)
+                ) {
+                    Text("配色", style = t.body, color = c.textPrimary)
+                    Spacer(Modifier.height(10.dp))
+                    Segmented(
+                        options = Palette.entries,
+                        selected = themePalette,
+                        label = { it.label },
+                        onSelect = onThemePaletteChange,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
             }
         }
 
@@ -287,13 +307,21 @@ fun ProfilePage(
                     subtitle = "${BuildConfig.VERSION_NAME} （${BuildConfig.VERSION_CODE}）",
                 )
                 RowDivider()
+                // 本项目与「SEU 课表」是同一作者的两个版本，这条是常驻的作者入口：
+                // 找源码、提问题、点 star 都从这里走（首次公告里那个只出现一次）。
+                SettingRow(
+                    title = "作者的 GitHub",
+                    subtitle = "Haa1024 · 源码与问题反馈都在这里",
+                    onClick = { openInBrowser(context, AppLinks.AUTHOR) },
+                )
+                RowDivider()
                 SettingRow(
                     title = "检查更新",
                     subtitle = "从发布页获取最新版本，装上即可覆盖更新，课表数据不受影响",
                     onClick = { updateStart = true },
                 )
                 RowDivider()
-                SettingRow(title = "数据来源", subtitle = "ehall 教务系统 · 导入后存在本机")
+                SettingRow(title = "数据来源", subtitle = "长安大学教务系统（EAMS）· 导入后存在本机")
                 RowDivider()
                 SettingRow(title = "第三方库", subtitle = "OkHttp · kotlinx.serialization · Compose")
             }

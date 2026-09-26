@@ -13,8 +13,10 @@ import java.time.LocalTime
 /**
  * 领域规则的护栏测试。
  *
- * 这里最有价值的一条是 [作息表自查无问题] —— 作息表是人工抄的 13 行时间，
+ * 这里最有价值的一条是 [作息表自查无问题] —— 作息表是人工抄的 11 行时间，
  * 极易出现"结束早于开始"这类笔误（真发生过）。
+ *
+ * 学期夹具取长安大学 2026-2027 学年秋季学期：**2026-08-31（周一）是第 1 周周一**。
  */
 class DomainRulesTest {
 
@@ -22,13 +24,14 @@ class DomainRulesTest {
         totalWeeks: Int = 18,
         lastTeachingWeek: Int = 16,
     ) = TermContext(
-        termCode = "2026-2027-2",
+        termCode = "2026-2027-1",
         termName = "2026-2027学年秋季学期",
-        firstMonday = LocalDate.of(2026, 9, 21),
+        firstMonday = LocalDate.of(2026, 8, 31),
         totalWeeks = totalWeeks,
         lastTeachingWeek = lastTeachingWeek,
-        morningPeriods = 5,
-        afternoonPeriods = 5,
+        // 长安大学上午 4 节 / 下午 4 节 / 晚上 3 节 = 11 节
+        morningPeriods = 4,
+        afternoonPeriods = 4,
         eveningPeriods = 3,
     )
 
@@ -46,47 +49,130 @@ class DomainRulesTest {
 
     @Test
     fun `作息表自查无问题`() {
-        val problems = PeriodSchedule(PeriodTimes.SEU).problems()
-        assertTrue("作息表有笔误：$problems", problems.isEmpty())
-    }
-
-    @Test
-    fun `作息表 13 节且分组与接口给的一致`() {
-        val s = PeriodTimes.SEU
-        assertEquals(13, s.size)
-        assertEquals(13, PeriodSchedule(s).maxPeriod)
-
-        // 上午 1-5：08:00 起，12:15 结束
-        assertEquals(LocalTime.of(8, 0), s[0].begin)
-        assertEquals(LocalTime.of(12, 15), s[4].end)
-        // 下午 6-10：14:00 起
-        assertEquals(LocalTime.of(14, 0), s[5].begin)
-        assertEquals(LocalTime.of(18, 15), s[9].end)
-        // 晚上 11-13：19:00 起
-        assertEquals(LocalTime.of(19, 0), s[10].begin)
-        assertEquals(LocalTime.of(21, 25), s[12].end)
-    }
-
-    @Test
-    fun `第 9 节是 16-40 到 17-25 而不是抄错的 15-25`() {
-        // 回归测试：用户提供原始数据时把第 9 节写成 "16:40 – 15:25"（结束早于开始）。
-        // 按 45 分钟节长与第 10 节 17:30 开始反推，正确值应为 17:25。
-        val p9 = PeriodTimes.SEU.single { it.index == 9 }
-        assertEquals(LocalTime.of(16, 40), p9.begin)
-        assertEquals(LocalTime.of(17, 25), p9.end)
-        assertEquals(45L, p9.durationMinutes())
-    }
-
-    @Test
-    fun `每节都是 45 分钟`() {
-        PeriodTimes.SEU.forEach {
-            assertEquals("第 ${it.index} 节不是 45 分钟", 45L, it.durationMinutes())
+        PeriodTimes.Campus.entries.forEach { campus ->
+            val problems = PeriodSchedule(PeriodTimes.of(campus)).problems()
+            assertTrue("${campus.label} 作息表有笔误：$problems", problems.isEmpty())
         }
     }
 
     @Test
-    fun `节次 index 连续从 1 到 13`() {
-        assertEquals((1..13).toList(), PeriodTimes.SEU.map { it.index })
+    fun `两个校区都是 11 节且节次连续`() {
+        PeriodTimes.Campus.entries.forEach { campus ->
+            val s = PeriodTimes.of(campus)
+            assertEquals("${campus.label} 应为 11 节", 11, s.size)
+            assertEquals("${campus.label} 节次应为 1..11", (1..11).toList(), s.map { it.index })
+            assertEquals(11, PeriodSchedule(s).maxPeriod)
+        }
+    }
+
+    /**
+     * 南校区（本部）的锚点时刻。
+     *
+     * 前 10 节来自学校官网「作息时间」页；第 11 节官网未列，由用户补全。
+     * 抄录出错时最先在这里暴露——尤其是第 2 节后 30 分钟的课间活动，
+     * 它是南校区与渭水校区最大的差别。
+     */
+    @Test
+    fun `南校区锚点时刻`() {
+        val s = PeriodTimes.CHU_NAN
+
+        assertEquals(LocalTime.of(8, 0), s[0].begin)      // 第 1 节
+        assertEquals(LocalTime.of(11, 50), s[3].end)      // 第 4 节，上午结束
+        assertEquals(LocalTime.of(14, 0), s[4].begin)     // 第 5 节，下午开始
+        assertEquals(LocalTime.of(17, 40), s[7].end)      // 第 8 节，下午结束
+        assertEquals(LocalTime.of(19, 0), s[8].begin)     // 第 9 节，晚上开始
+        assertEquals(LocalTime.of(20, 45), s[10].begin)   // 第 11 节 ★ 用户补全
+        assertEquals(LocalTime.of(21, 35), s[10].end)
+
+        // 第 2 节后是 30 分钟的课间活动（其余节间间隔都短得多）
+        assertEquals(30L, java.time.Duration.between(s[1].end, s[2].begin).toMinutes())
+    }
+
+    /**
+     * 渭水校区的锚点时刻。
+     *
+     * 该套作息全天每节都是 45 分钟、无一例外，可作为"抄错了没有"的对照；
+     * 与南校区整体错开 35 分钟——这正是必须让用户选校区、而不能只留一套的原因。
+     *
+     * 课间**不是**"一律 5 分钟"：半天内分两个大节，第 1→2、3→4、5→6、7→8、9→10
+     * 这些小节的间隔是 5 分钟，而第 2→3、第 6→7 节之间是 15 分钟（大节之间的大课间）。
+     * 第 4→5 节跨午休、第 8→9 节跨晚休，不在本用例的断言范围内。
+     */
+    @Test
+    fun `渭水校区锚点时刻且全节 45 分钟`() {
+        val s = PeriodTimes.CHU_WEISHUI
+
+        assertEquals(LocalTime.of(8, 35), s[0].begin)     // 第 1 节比南校区晚 35 分钟
+        assertEquals(LocalTime.of(21, 25), s[10].end)
+
+        s.forEach {
+            assertEquals("渭水第 ${it.index} 节应为 45 分钟", 45L, it.durationMinutes())
+        }
+
+        // 15 分钟的大课间把每个半天切成两个大节：2|3 与 6|7。
+        // 4 与 8 之后分别是午休、晚休，间隔是两个多小时，不在此列。
+        val bigBreaks = setOf(2, 6)
+        val acrossMealBreak = setOf(4, 8)
+        s.zipWithNext { a, b ->
+            if (a.index in acrossMealBreak) return@zipWithNext
+            val expected = if (a.index in bigBreaks) 15L else 5L
+            assertEquals(
+                "渭水第 ${a.index} 与第 ${b.index} 节之间应为 $expected 分钟",
+                expected,
+                java.time.Duration.between(a.end, b.begin).toMinutes(),
+            )
+        }
+
+        // 午休与晚休本身也要够长，否则说明某一行被挪位了
+        assertEquals(145L, java.time.Duration.between(s[3].end, s[4].begin).toMinutes())
+        assertEquals(70L, java.time.Duration.between(s[7].end, s[8].begin).toMinutes())
+    }
+
+    /**
+     * 南校区的课间节律。
+     *
+     * 之所以逐段钉住：这套表由人工抄录，"某一行整体挪了一格"这类错在单看每一行时
+     * 完全正常，只有把相邻行连起来才看得出来。第 4、8 节之后是午休 / 晚休，不在此列。
+     */
+    @Test
+    fun `南校区课间节律`() {
+        val s = PeriodTimes.CHU_NAN
+        val expected = mapOf(
+            1 to 10L, 2 to 30L, 3 to 10L,
+            5 to 10L, 6 to 20L, 7 to 10L,
+            9 to 10L, 10 to 5L,
+        )
+        expected.forEach { (index, minutes) ->
+            val a = s.single { it.index == index }
+            val b = s.single { it.index == index + 1 }
+            assertEquals(
+                "南校区第 $index 与第 ${index + 1} 节之间应为 $minutes 分钟",
+                minutes,
+                java.time.Duration.between(a.end, b.begin).toMinutes(),
+            )
+        }
+    }
+
+    /** 南校区第 11 节是全天唯一一个 50 分钟的节次，官方与用户口径一致。 */
+    @Test
+    fun `除南校区第 11 节外其余各节都是 45 分钟`() {
+        PeriodTimes.of(PeriodTimes.Campus.NAN).forEach {
+            if (it.index == 11) {
+                assertEquals("第 11 节是 50 分钟的例外", 50L, it.durationMinutes())
+            } else {
+                assertEquals("第 ${it.index} 节不是 45 分钟", 45L, it.durationMinutes())
+            }
+        }
+    }
+
+    @Test
+    fun `默认作息就是默认校区的作息`() {
+        assertEquals(PeriodTimes.of(PeriodTimes.Campus.DEFAULT), PeriodTimes.default)
+        assertEquals(PeriodTimes.Campus.NAN, PeriodTimes.Campus.DEFAULT)
+        // 脏值不该把界面弄崩
+        assertEquals(PeriodTimes.Campus.DEFAULT, PeriodTimes.Campus.byName("火星校区"))
+        assertEquals(PeriodTimes.Campus.DEFAULT, PeriodTimes.Campus.byName(null))
+        assertEquals(PeriodTimes.Campus.WEISHUI, PeriodTimes.Campus.byName("WEISHUI"))
     }
 
     @Test
@@ -109,12 +195,13 @@ class DomainRulesTest {
     @Test
     fun `课程状态 未开始 进行中 已结束`() {
         val sch = PeriodSchedule()
-        val s = session()          // 第 1-2 节 = 08:00 – 09:35
+        val s = session()          // 第 1-2 节 = 08:00 – 09:40
 
         assertEquals(SessionStatus.UPCOMING, sch.statusOf(s, LocalTime.of(7, 30)))
         assertEquals(SessionStatus.ONGOING, sch.statusOf(s, LocalTime.of(8, 20)))
         assertEquals(SessionStatus.ONGOING, sch.statusOf(s, LocalTime.of(9, 0)))
-        assertEquals(SessionStatus.FINISHED, sch.statusOf(s, LocalTime.of(9, 36)))
+        assertEquals(SessionStatus.ONGOING, sch.statusOf(s, LocalTime.of(9, 40)))  // 结束那一刻仍算进行中
+        assertEquals(SessionStatus.FINISHED, sch.statusOf(s, LocalTime.of(9, 41)))
     }
 
     @Test
@@ -126,18 +213,18 @@ class DomainRulesTest {
         assertNull("已开始就没有'还有几分钟'", sch.minutesUntilStart(s, LocalTime.of(8, 20)))
 
         assertNull("未开始没有进度", sch.progressOf(s, LocalTime.of(7, 30)))
-        assertNull("已结束没有进度", sch.progressOf(s, LocalTime.of(9, 36)))
+        assertNull("已结束没有进度", sch.progressOf(s, LocalTime.of(9, 41)))
         val p = sch.progressOf(s, LocalTime.of(8, 45))!!
         assertTrue("进度应在 0..1 之间，实际 $p", p in 0f..1f)
-        assertTrue("约 45 分钟 / 95 分钟 ≈ 0.47", p > 0.4f && p < 0.55f)
+        assertTrue("约 45 分钟 / 100 分钟 ≈ 0.45", p > 0.4f && p < 0.55f)
     }
 
     @Test
     fun `下一节课 = 今天里开始时间晚于现在的最早一节课`() {
         val sch = PeriodSchedule()
         val morning = session(id = "a", from = 1, to = 2)    // 08:00 起
-        val noon = session(id = "b", from = 6, to = 7)       // 14:00 起
-        val evening = session(id = "c", from = 11, to = 13)  // 19:00 起
+        val noon = session(id = "b", from = 5, to = 6)       // 14:00 起
+        val evening = session(id = "c", from = 11, to = 11)  // 19:00 起（长安大学最后一节）
         val today = listOf(evening, morning, noon)           // 故意乱序，验证不是取第一个
 
         assertEquals("a", sch.nextSessionOf(today, LocalTime.of(7, 0))!!.id)
@@ -289,10 +376,10 @@ class DomainRulesTest {
             ),
             currentWeek = 1,
         )
-        // 2026-09-23 是第 1 周的周三
-        assertEquals(DayOfWeek.WEDNESDAY, LocalDate.of(2026, 9, 23).dayOfWeek)
-        assertEquals(listOf("s2"), t.sessionsOnDate(LocalDate.of(2026, 9, 23)).map { it.id })
-        assertEquals(listOf("s1"), t.sessionsOnDate(LocalDate.of(2026, 9, 21)).map { it.id })
+        // 2026-09-02 是第 1 周的周三
+        assertEquals(DayOfWeek.WEDNESDAY, LocalDate.of(2026, 9, 2).dayOfWeek)
+        assertEquals(listOf("s2"), t.sessionsOnDate(LocalDate.of(2026, 9, 2)).map { it.id })
+        assertEquals(listOf("s1"), t.sessionsOnDate(LocalDate.of(2026, 8, 31)).map { it.id })
     }
 
     @Test
@@ -331,13 +418,13 @@ class DomainRulesTest {
      */
     @Test
     fun `周次在周一跨周`() {
-        val t = term()  // firstMonday = 2026-09-21
+        val t = term()  // firstMonday = 2026-08-31
 
-        assertEquals(1, t.weekOf(LocalDate.of(2026, 9, 21)))  // 第 1 周周一
-        assertEquals(1, t.weekOf(LocalDate.of(2026, 9, 27)))  // 第 1 周周日
-        assertEquals(2, t.weekOf(LocalDate.of(2026, 9, 28)))  // 第 2 周周一 ★
-        assertEquals(2, t.weekOf(LocalDate.of(2026, 10, 4)))  // 第 2 周周日
-        assertEquals(3, t.weekOf(LocalDate.of(2026, 10, 5)))  // 第 3 周周一
+        assertEquals(1, t.weekOf(LocalDate.of(2026, 8, 31)))  // 第 1 周周一
+        assertEquals(1, t.weekOf(LocalDate.of(2026, 9, 6)))   // 第 1 周周日
+        assertEquals(2, t.weekOf(LocalDate.of(2026, 9, 7)))   // 第 2 周周一 ★
+        assertEquals(2, t.weekOf(LocalDate.of(2026, 9, 13)))  // 第 2 周周日
+        assertEquals(3, t.weekOf(LocalDate.of(2026, 9, 14)))  // 第 3 周周一
     }
 
     /** 整个跨周区间内，每一天的周次都必须与它所属的那一周一致。 */
@@ -345,12 +432,12 @@ class DomainRulesTest {
     fun `整周七天周次一致`() {
         val t = term()
         for (day in 0..6) {
-            val d = LocalDate.of(2026, 9, 21).plusDays(day.toLong())
-            assertEquals("9/21 起第 $day 天应属第 1 周", 1, t.weekOf(d))
+            val d = LocalDate.of(2026, 8, 31).plusDays(day.toLong())
+            assertEquals("8/31 起第 $day 天应属第 1 周", 1, t.weekOf(d))
         }
         for (day in 0..6) {
-            val d = LocalDate.of(2026, 9, 28).plusDays(day.toLong())
-            assertEquals("9/28 起第 $day 天应属第 2 周", 2, t.weekOf(d))
+            val d = LocalDate.of(2026, 9, 7).plusDays(day.toLong())
+            assertEquals("9/7 起第 $day 天应属第 2 周", 2, t.weekOf(d))
         }
     }
 
@@ -374,19 +461,19 @@ class DomainRulesTest {
      */
     @Test
     fun `开学前算出非正数 调用方须夹到第 1 周`() {
-        val t = term()  // firstMonday = 2026-09-21
+        val t = term()  // firstMonday = 2026-08-31
 
         // 向零取整：开学前不满 7 天 → 落在第 1 周（不是第 0 周）
-        assertEquals(1, t.weekOf(LocalDate.of(2026, 9, 20)))   // 前一天
-        assertEquals(1, t.weekOf(LocalDate.of(2026, 9, 15)))   // 前六天
+        assertEquals(1, t.weekOf(LocalDate.of(2026, 8, 30)))   // 前一天
+        assertEquals(1, t.weekOf(LocalDate.of(2026, 8, 25)))   // 前六天
 
         // 满 7 天才落到 0 及以下
-        assertEquals(0, t.weekOf(LocalDate.of(2026, 9, 14)))   // 前七天
-        assertEquals(-1, t.weekOf(LocalDate.of(2026, 9, 7)))   // 前十四天
+        assertEquals(0, t.weekOf(LocalDate.of(2026, 8, 24)))   // 前七天
+        assertEquals(-1, t.weekOf(LocalDate.of(2026, 8, 17)))  // 前十四天
 
         // 调用方按约定夹紧
-        assertEquals(1, t.weekOf(LocalDate.of(2026, 9, 14)).coerceAtLeast(1))
-        assertEquals(1, t.weekOf(LocalDate.of(2026, 9, 7)).coerceAtLeast(1))
+        assertEquals(1, t.weekOf(LocalDate.of(2026, 8, 24)).coerceAtLeast(1))
+        assertEquals(1, t.weekOf(LocalDate.of(2026, 8, 17)).coerceAtLeast(1))
     }
 
     /**
@@ -415,9 +502,9 @@ class DomainRulesTest {
     @Test
     fun `表头日期随所选周变化`() {
         val t = term()
-        assertEquals(LocalDate.of(2026, 9, 21), t.dateOf(1, 1))   // 第 1 周周一
-        assertEquals(LocalDate.of(2026, 9, 27), t.dateOf(1, 7))   // 第 1 周周日
-        assertEquals(LocalDate.of(2026, 9, 28), t.dateOf(2, 1))   // 第 2 周周一
-        assertEquals(LocalDate.of(2026, 9, 23), t.dateOf(1, 3))   // 第 1 周周三
+        assertEquals(LocalDate.of(2026, 8, 31), t.dateOf(1, 1))   // 第 1 周周一
+        assertEquals(LocalDate.of(2026, 9, 6), t.dateOf(1, 7))    // 第 1 周周日
+        assertEquals(LocalDate.of(2026, 9, 7), t.dateOf(2, 1))    // 第 2 周周一
+        assertEquals(LocalDate.of(2026, 9, 2), t.dateOf(1, 3))    // 第 1 周周三
     }
 }

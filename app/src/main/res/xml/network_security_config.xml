@@ -2,29 +2,32 @@
 <!--
   网络安全配置。
 
-  学校统一身份认证回跳时 `service` 参数为 http://（服务端配置，客户端不可改）：
+  【为什么必须放行明文】
 
-      GET https://ehall.seu.edu.cn/jwapp/sys/wdkb/*default/index.do
-      → 302 Location: https://auth.seu.edu.cn/dist/#/dist/main/login
-                        ?service=http%3A%2F%2Fehall.seu.edu.cn%2F...   ← http
-  登录成功后按该 service 回跳：
+  长安大学的课表业务系统本身就是 http —— `http://bkjw.chd.edu.cn/eams/` 全程明文，
+  没有 https 版本；只有认证域 `https://ids.chd.edu.cn/authserver` 是 https。
 
-      http://ehall.seu.edu.cn/jwapp/sys/wdkb/*default/index.do?...&ticket=ST-xxxx
+  Android 自 targetSdk 28 起默认禁止明文 HTTP。不放开这条的具体后果是：
+  OkHttp 在发请求前就抛
+  `CLEARTEXT communication to bkjw.chd.edu.cn not permitted by network security policy`，
+  课表接口一个都调不通，登录也会卡在「换票回跳」那一跳。
 
-  Android 自 targetSdk 28 起默认禁止明文 HTTP，WebView 会以
-  `net::ERR_CLEARTEXT_NOT_PERMITTED` 中断，表现为「登录成功却跳不回来」。
+  【为什么它不只是"业务接口要用"】
 
-  放行安全：该 http 地址本身不返回内容，仅做 302 升级为 https，票据最终在 https 上校验；
-  且仅对 seu.edu.cn 开放，其余域名仍禁止明文。
+  认证服务端回跳时 `service` 参数由服务端配置成 http://，客户端改不了；
+  登录成功后要按该 service 明文回跳一次（带 ticket）。
+  所以这条例外同时兜住「换票回跳」，少放行它，现象是「登录成功却跳不回来」。
+
+  仍然限定在 chd.edu.cn 之内：默认策略保持禁止明文，其余域名一律不放行。
 -->
 <network-security-config>
 
     <!-- 默认禁止明文，不得改为 true。 -->
     <base-config cleartextTrafficPermitted="false" />
 
-    <!-- 唯一例外：学校域名。服务端自行升级到 https，此处仅让该次 302 通过。 -->
+    <!-- 长安大学：业务系统本体即 http，且换票回跳也落在这个域上。 -->
     <domain-config cleartextTrafficPermitted="true">
-        <domain includeSubdomains="true">seu.edu.cn</domain>
+        <domain includeSubdomains="true">chd.edu.cn</domain>
     </domain-config>
 
 </network-security-config>

@@ -3,14 +3,14 @@ package com.seu.timetable.data
 import com.seu.timetable.domain.Timetable
 
 /**
- * 课表数据源接口。当前数据来自 ehall「我的课表」微应用，
- *   未来亦可切换其他教务接口，上层无需感知接口形态。
+ * 课表数据源接口。当前实现取自长安大学 EAMS（见 `ChuTimetableSource`），
+ *   日后接入别的教务系统时另写一个实现即可，上层无需感知接口形态。
  */
 interface TimetableSource {
 
     /**
      * 加载一次课表。
-     * @param termCode 学期代码如 `2026-2027-2`；传 null 表示「当前学期」。
+     * @param termCode 学期代码如 `2026-2027-1`；传 null 表示「当前学期」。
      */
     suspend fun load(termCode: String? = null): Timetable
 }

@@ -41,6 +41,7 @@ import com.seu.timetable.domain.BoardMeta
 import com.seu.timetable.domain.BoardSource
 import com.seu.timetable.domain.DAY_NAMES
 import com.seu.timetable.domain.PeriodSchedule
+import com.seu.timetable.domain.PeriodTime
 import com.seu.timetable.domain.PeriodTimes
 import com.seu.timetable.ui.components.ActionMenuDialog
 import com.seu.timetable.ui.components.BackIcon
@@ -101,7 +102,19 @@ fun BoardSettingsPage(
     // ---- 作息 ----
     var rows by remember { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
 
-    /** 作息是抄自哪张课表（名字）。恢复默认时清掉；保存时写进 BoardMeta。 */
+    /** 选定的校区。决定「没自定义时跟随哪套预设」——两校区作息相差 35 分钟 */
+    var campus by remember { mutableStateOf(PeriodTimes.Campus.DEFAULT) }
+
+    /**
+     * 是否处于「自定义」模式。
+     *
+     * 纯界面状态，**不落盘**：它只决定编辑区展不展开。
+     * 真正落盘的是 [TimetableRepository.savePeriod] 的 `custom` 是否为空
+     * （空 = 跟随 [campus] 那套预设）。
+     */
+    var customMode by remember { mutableStateOf(false) }
+
+    /** 作息是抄自哪张课表（名字）。跟随预设时清掉；保存时写进 BoardMeta。 */
     var copiedFromName by remember { mutableStateOf<String?>(null) }
 
     // ---- 显示（即时生效，不走「保存」）----
@@ -124,6 +137,8 @@ fun BoardSettingsPage(
         morningText = term.morningPeriods.toString()
         afternoonText = term.afternoonPeriods.toString()
         eveningText = term.eveningPeriods.toString()
+        campus = board.meta.campusOf
+        customMode = board.meta.hasCustomSchedule
         rows = board.meta.periodSchedule.times.sortedBy { it.index }
             .map { it.beginLabel() to it.end.toString() }
         copiedFromName = board.meta.copiedFrom
@@ -160,9 +175,13 @@ fun BoardSettingsPage(
                     message = "「${source.name}」已经不存在了。"
                     return@launch
                 }
+                // 校区随作息一起带过来：两者本就绑定，只抄时刻会得到
+                // "渭水的时刻表 + 南校区的标签"这种自相矛盾的组合
+                campus = snap.campus
+                customMode = snap.custom
                 rows = snap.schedule.sortedBy { it.index }
                     .map { it.beginLabel() to it.end.toString() }
-                // 来源若也是"跟随默认"，那抄过来仍然记成"跟随默认"，来源名不记
+                // 来源若也是"跟随预设"，那抄过来仍然记成"跟随预设"，来源名不记
                 copiedFromName = snap.copiedFromLabel
                 val manual = loaded?.meta?.source == BoardSource.MANUAL
                 if (manual) {
@@ -187,8 +206,24 @@ fun BoardSettingsPage(
         val manual = board.meta.source == BoardSource.MANUAL
         message = null
 
-        // ---- ① 学期骨架校验（只对自建课表）----
-        var monday = board.meta.term.firstMonday
+        // ---- ① 第一周周一：**两种来源都要校验** ----
+        // 原先只有自建表管它，理由是"导入表的骨架来自教务"。那对长安大学不成立：
+        // EAMS 没有任何接口给出学期起止日期（技能 §9.2），导入表的开学日同样是兜底值
+        // （"把本周当第 1 周"），不修正就让整张表的周次静默偏掉。
+        val parsedMonday = runCatching { LocalDate.parse(mondayText.trim()) }.getOrNull()
+        if (parsedMonday == null) {
+            message = "第一周周一要写成 2026-09-21 这样的日期"
+            return
+        }
+        // 必须是周一：周次推算为 `起点 + (周-1)*7 天 + (星期-1) 天`，
+        // 起点非周一会使所有日期整体偏移，且不报错。
+        if (parsedMonday.dayOfWeek != DayOfWeek.MONDAY) {
+            message = "第一周周一是「${DAY_NAMES[parsedMonday.dayOfWeek.value]}」" +
+                "（$parsedMonday），但它必须是周一。整张课表的日期均由此推算。"
+            return
+        }
+
+        // ---- ② 周数与节次分组：只有自建表可改，导入表沿用服务端值 ----
         var total = board.meta.term.totalWeeks
         var teaching = board.meta.term.lastTeachingWeek
         var morning = board.meta.term.morningPeriods
@@ -196,18 +231,6 @@ fun BoardSettingsPage(
         var evening = board.meta.term.eveningPeriods
 
         if (manual) {
-            val parsedMonday = runCatching { LocalDate.parse(mondayText.trim()) }.getOrNull()
-            if (parsedMonday == null) {
-                message = "第一周周一要写成 2026-09-21 这样的日期"
-                return
-            }
-            // 必须是周一：周次推算为 `起点 + (周-1)*7 天 + (星期-1) 天`，
-            // 起点非周一会使所有日期整体偏移，且不报错。
-            if (parsedMonday.dayOfWeek != DayOfWeek.MONDAY) {
-                message = "第一周周一是「${DAY_NAMES[parsedMonday.dayOfWeek.value]}」" +
-                    "（$parsedMonday），但它必须是周一。整张课表的日期均由此推算。"
-                return
-            }
             val tt = totalWeeksText.trim().toIntOrNull()
             val tw = teachingWeeksText.trim().toIntOrNull()
             val m = morningText.trim().toIntOrNull()
@@ -226,7 +249,7 @@ fun BoardSettingsPage(
                 return
             }
 
-            // 缩小节次分组的后果须明确提示：已排在第 12、13 节的课在新分组下会被画到
+            // 缩小节次分组的后果须明确提示：节数一减，已排在新上限之后的课会被画到
             // 网格之外，界面上只是「不见了」且不报错，属本地编辑最易静默丢数据的一处。
             val newPeriods = m + a + e
             val overflow = board.content.sessions.filter { it.endPeriod > newPeriods }
@@ -241,7 +264,6 @@ fun BoardSettingsPage(
                 return
             }
 
-            monday = parsedMonday
             total = tt
             teaching = tw
             morning = m
@@ -249,11 +271,17 @@ fun BoardSettingsPage(
             evening = e
         }
 
-        // ---- ② 作息校验 ----
-        val inputs = rows.mapIndexed { i, p -> Triple(i + 1, p.first, p.second) }
-        val schedule = PeriodSchedule.fromInputs(inputs).getOrElse {
-            message = it.message ?: "作息时间填得不对"
-            return
+        // ---- ③ 作息：**只在自定义模式读输入框** ----
+        // 跟随预设时不看它——此时输入框里可能还留着上次自定义的残值，
+        // 照它保存等于把用户已经放弃的旧值又写了回去。
+        val customTimes: List<PeriodTime>? = if (customMode) {
+            val inputs = rows.mapIndexed { i, p -> Triple(i + 1, p.first, p.second) }
+            PeriodSchedule.fromInputs(inputs).getOrElse {
+                message = it.message ?: "作息时间填得不对"
+                return
+            }.times
+        } else {
+            null
         }
 
         saving = true
@@ -262,15 +290,22 @@ fun BoardSettingsPage(
                 if (manual) {
                     repo.saveTermConfig(
                         id = boardId,
-                        firstMonday = monday,
+                        firstMonday = parsedMonday,
                         totalWeeks = total,
                         lastTeachingWeek = teaching,
                         morningPeriods = morning,
                         afternoonPeriods = afternoon,
                         eveningPeriods = evening,
                     )
+                } else {
+                    repo.setFirstMonday(boardId, parsedMonday)
                 }
-                repo.saveSchedule(boardId, schedule.times, copiedFromName)
+                repo.savePeriod(
+                    id = boardId,
+                    campus = campus,
+                    custom = customTimes,
+                    copiedFrom = if (customTimes != null) copiedFromName else null,
+                )
                 onSaved()
             } catch (e: Exception) {
                 message = "保存失败：${e.message ?: "未知错误"}"
@@ -380,69 +415,13 @@ fun BoardSettingsPage(
 
             // ================= 学期骨架 =================
             Spacer(Modifier.height(18.dp))
-            SectionLabel(if (manual) "学期与周数" else "学期与周数（来自教务，不可修改）")
+            SectionLabel("学期与周数")
             Spacer(Modifier.height(8.dp))
 
             if (manual) {
                 SeuCard(Modifier.fillMaxWidth()) {
                     Column {
-                        Text("第一周周一", style = t.body, color = c.textSecondary)
-                        Spacer(Modifier.height(8.dp))
-                        // 文本键盘：数字键盘没有 "-"，写不出 2026-09-21
-                        SeuTextField(mondayText, { mondayText = it }, placeholder = "2026-09-21")
-
-                        Spacer(Modifier.height(8.dp))
-                        val thisMonday = LocalDate.now()
-                            .with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY))
-                        Row(
-                            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            listOf(
-                                "本周一" to thisMonday,
-                                "下周一" to thisMonday.plusWeeks(1),
-                                "上周一" to thisMonday.minusWeeks(1),
-                                "往前一周" to null,
-                            ).forEach { (label, date) ->
-                                val target = date
-                                    ?: runCatching { LocalDate.parse(mondayText.trim()) }
-                                        .getOrNull()?.minusWeeks(1)
-                                if (target == null) return@forEach
-                                val selected = mondayText.trim() == target.toString()
-                                Box(
-                                    Modifier
-                                        .clip(RoundedCornerShape(SeuRadius.tag))
-                                        .background(if (selected) c.primary else c.surfaceSunken)
-                                        .clickable { mondayText = target.toString() }
-                                        .padding(horizontal = 12.dp, vertical = 7.dp),
-                                ) {
-                                    Text(
-                                        label,
-                                        style = t.caption,
-                                        color = if (selected) c.onPrimary else c.textSecondary,
-                                    )
-                                }
-                            }
-                        }
-
-                        // 实时回显：让用户能把"这个日期"和"第 1 周是哪几天"对上
-                        Spacer(Modifier.height(10.dp))
-                        val parsed = runCatching { LocalDate.parse(mondayText.trim()) }.getOrNull()
-                        val ok = parsed?.dayOfWeek == DayOfWeek.MONDAY
-                        Text(
-                            when {
-                                parsed == null ->
-                                    "填写日期后，这里会显示推算出的第 1 周区间。"
-                                ok ->
-                                    "第 1 周：${rangeLabel(parsed)}；" +
-                                        "改动只影响「第几周 ↔ 哪几天」的换算，已排好的课不会丢。"
-                                else ->
-                                    "$parsed 是「${DAY_NAMES[parsed.dayOfWeek.value]}」，不是周一。" +
-                                        "起点有误会使整张课表的日期整体偏移，且界面不显示任何异常。"
-                            },
-                            style = t.caption,
-                            color = if (parsed != null && !ok) c.danger else c.textTertiary,
-                        )
+                        MondayEditor(mondayText) { mondayText = it }
 
                         Spacer(Modifier.height(16.dp))
                         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -503,23 +482,26 @@ fun BoardSettingsPage(
                     }
                 }
             } else {
-                SeuCard(Modifier.fillMaxWidth(), padding = 0.dp) {
-                    Column(Modifier.padding(horizontal = 16.dp)) {
-                        InfoRow("第一周周一", term.firstMonday.toString())
-                        RowDivider()
-                        InfoRow("周数", "${term.totalWeeks} 周（教学周 ${term.lastTeachingWeek} 周）")
-                        RowDivider()
-                        InfoRow(
-                            "节次分组",
-                            "上午 ${term.morningPeriods} · 下午 ${term.afternoonPeriods} · " +
+                // 导入表：**第一周周一同样可改**（理由见 [MondayEditor] 的说明——
+                // EAMS 不提供学期起止日期），其余骨架来自服务端，改了就是假数据，故只读。
+                SeuCard(Modifier.fillMaxWidth()) {
+                    Column {
+                        MondayEditor(mondayText) { mondayText = it }
+
+                        Spacer(Modifier.height(14.dp))
+                        Text(
+                            "总周数 ${term.totalWeeks} 周（教学周 ${term.lastTeachingWeek} 周）· " +
+                                "节次分组 上午 ${term.morningPeriods} / 下午 ${term.afternoonPeriods} / " +
                                 "晚上 ${term.eveningPeriods}（共 ${term.periodsPerDay} 节）",
+                            style = t.caption,
+                            color = c.textTertiary,
                         )
                     }
                 }
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    "这些值来自教务系统的学期设置（cxjcs 接口），属服务端权威值。" +
-                        "本地改动会产生与实际不符的数据，因此只读；作息时间不受此限制。",
+                    "周数与节次分组来自教务系统，属服务端权威值，本地改就是假数据，故只读。" +
+                        "开学日期教务不提供，必须由你填写。",
                     style = t.caption,
                     color = c.textTertiary,
                 )
@@ -529,6 +511,39 @@ fun BoardSettingsPage(
             Spacer(Modifier.height(18.dp))
             SectionLabel("作息时间（每节的开始 / 结束时刻）")
             Spacer(Modifier.height(8.dp))
+
+            // 选校区：两套预设 + 自定义。**必须让用户显式选**——两校区第一节课相差 35 分钟，
+            // 选错会让今日页的倒计时与上课提醒整体偏，而课表网格本身看起来毫无异常。
+            Row(
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                PeriodTimes.Campus.entries.forEach { cp ->
+                    ChoiceChip(
+                        label = cp.label,
+                        selected = !customMode && campus == cp,
+                        onClick = {
+                            message = null
+                            campus = cp
+                            customMode = false
+                            // 回到"跟随预设"即没有抄自哪里，清掉以免列表页显示
+                            // 「自定义作息 · 复制自 X」这类自相矛盾的描述
+                            copiedFromName = null
+                        },
+                    )
+                }
+                ChoiceChip(
+                    label = "自定义",
+                    selected = customMode,
+                    onClick = {
+                        message = null
+                        customMode = true
+                        // 从当前那套预设起步改，而不是清空：多数人只想微调一两节
+                        rows = PeriodTimes.of(campus).map { it.beginLabel() to it.end.toString() }
+                    },
+                )
+            }
+            Spacer(Modifier.height(10.dp))
 
             // 从别的课表抄一份：省掉重复录入，但**不建立任何联动**——
             // 抄完两边各自独立，之后改哪边都不影响另一边。
@@ -551,31 +566,54 @@ fun BoardSettingsPage(
                 Spacer(Modifier.height(8.dp))
             }
 
-            SeuCard(Modifier.fillMaxWidth()) {
-                Column {
-                    rows.forEachIndexed { i, pair ->
-                        if (i > 0) Spacer(Modifier.height(10.dp))
-                        PeriodTimeRow(
-                            period = i + 1,
-                            begin = pair.first,
-                            end = pair.second,
-                            onBegin = { v ->
-                                rows = rows.toMutableList().also { it[i] = v to pair.second }
-                            },
-                            onEnd = { v ->
-                                rows = rows.toMutableList().also { it[i] = pair.first to v }
-                            },
+            if (customMode) {
+                SeuCard(Modifier.fillMaxWidth()) {
+                    Column {
+                        rows.forEachIndexed { i, pair ->
+                            if (i > 0) Spacer(Modifier.height(10.dp))
+                            PeriodTimeRow(
+                                period = i + 1,
+                                begin = pair.first,
+                                end = pair.second,
+                                onBegin = { v ->
+                                    rows = rows.toMutableList().also { it[i] = v to pair.second }
+                                },
+                                onEnd = { v ->
+                                    rows = rows.toMutableList().also { it[i] = pair.first to v }
+                                },
+                            )
+                        }
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "时刻写成 24 小时制两位，例如 08:00 / 14:30，结束必须晚于开始。" +
+                        "课表页的节次栏会直接显示这些时刻。",
+                    style = t.caption,
+                    color = c.textTertiary,
+                )
+            } else {
+                // 跟随预设时不铺 11 行输入框（既占地方又给人以"能改"的错觉），
+                // 只报首末两节，够用户核对是不是自己要的那套。
+                val preset = PeriodTimes.of(campus)
+                SeuCard(Modifier.fillMaxWidth()) {
+                    Column {
+                        Text(
+                            "第 1 节 ${preset.first().label()} … " +
+                                "第 ${preset.size} 节 ${preset.last().label()}",
+                            style = t.body,
+                            color = c.textPrimary,
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            "正在跟随「${campus.label}」作息。学校日后调整它会自动同步，" +
+                                "不必手改；只想改其中几节就点上面的「自定义」。",
+                            style = t.caption,
+                            color = c.textTertiary,
                         )
                     }
                 }
             }
-            Spacer(Modifier.height(8.dp))
-            Text(
-                "时刻写成 24 小时制两位，例如 08:00 / 14:30，结束必须晚于开始。" +
-                    "课表页的节次栏会直接显示这些时刻。",
-                style = t.caption,
-                color = c.textTertiary,
-            )
 
             message?.let { msg ->
                 Spacer(Modifier.height(12.dp))
@@ -591,27 +629,6 @@ fun BoardSettingsPage(
                 enabled = !saving,
                 modifier = Modifier.fillMaxWidth(),
             )
-
-            Spacer(Modifier.height(10.dp))
-            Box(
-                Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(SeuRadius.button))
-                    .background(c.surface)
-                    .border(1.dp, c.border, RoundedCornerShape(SeuRadius.button))
-                    .clickable {
-                        message = null
-                        // 恢复默认即回到「跟随学校默认」，故「抄自何处」记录亦须清除：
-                        // 默认作息无来源可言，保留会使列表页显示
-                        // 「自定义作息 · 复制自 X」这类自相矛盾的表述。
-                        copiedFromName = null
-                        rows = PeriodTimes.SEU.map { it.beginLabel() to it.end.toString() }
-                    }
-                    .padding(vertical = 14.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text("作息恢复成学校默认（东南大学 13 节）", style = t.itemTitle, color = c.primary)
-            }
 
             Spacer(Modifier.height(28.dp))
         }
@@ -634,6 +651,112 @@ fun BoardSettingsPage(
             onDismiss = { showImportMenu = false },
         )
     }
+}
+
+/**
+ * 胶囊选择按钮（作息区块的「校区 / 自定义」用它）。
+ *
+ * 与 `NewBoardPage` 里学期候选那几个 chip 同一套样式：选中填主色、未选中白底描边。
+ * 刻意不给固定宽度：选项文字长短不一（「南校区（本部）」比「渭水校区」长），
+ * 等分会把长的那个挤断行。
+ */
+@Composable
+private fun ChoiceChip(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    val c = LocalSeuColors.current
+    val t = LocalSeuType.current
+    Box(
+        Modifier
+            .clip(RoundedCornerShape(SeuRadius.tag))
+            .background(if (selected) c.primary else c.surface)
+            .border(
+                1.dp,
+                if (selected) c.primary else c.border,
+                RoundedCornerShape(SeuRadius.tag),
+            )
+            .clickable { onClick() }
+            .padding(horizontal = 14.dp, vertical = 8.dp),
+    ) {
+        Text(
+            label,
+            style = t.caption,
+            color = if (selected) c.onPrimary else c.textSecondary,
+        )
+    }
+}
+
+/**
+ * 「第一周周一」编辑器：输入框 + 快捷日期 + 实时回显。
+ *
+ * ★ 抽成组件是因为**自建表与导入表都要它**。原先这块 UI 只长在自建表那边，
+ * 而理由是"导入课表的骨架来自教务"——那个理由对长安大学不成立：
+ * EAMS 没有任何接口给出学期起止日期（技能 §9.2），导入表的开学日同样是兜底值
+ * （"把本周当第 1 周"），不修正就会让整张表的周次静默偏掉。
+ *
+ * 不用数字键盘：那里没有 `-`，而日期必须写成 `2026-09-21`。
+ */
+@Composable
+private fun MondayEditor(
+    mondayText: String,
+    onMonday: (String) -> Unit,
+) {
+    val c = LocalSeuColors.current
+    val t = LocalSeuType.current
+
+    Text("第一周周一", style = t.body, color = c.textSecondary)
+    Spacer(Modifier.height(8.dp))
+    SeuTextField(mondayText, onMonday, placeholder = "2026-09-21")
+
+    Spacer(Modifier.height(8.dp))
+    val thisMonday = LocalDate.now().with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY))
+    Row(
+        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        listOf(
+            "本周一" to thisMonday,
+            "下周一" to thisMonday.plusWeeks(1),
+            "上周一" to thisMonday.minusWeeks(1),
+            "往前一周" to null,
+        ).forEach { (label, date) ->
+            val target = date
+                ?: runCatching { LocalDate.parse(mondayText.trim()) }.getOrNull()?.minusWeeks(1)
+            if (target == null) return@forEach
+            val selected = mondayText.trim() == target.toString()
+            Box(
+                Modifier
+                    .clip(RoundedCornerShape(SeuRadius.tag))
+                    .background(if (selected) c.primary else c.surfaceSunken)
+                    .clickable { onMonday(target.toString()) }
+                    .padding(horizontal = 12.dp, vertical = 7.dp),
+            ) {
+                Text(
+                    label,
+                    style = t.caption,
+                    color = if (selected) c.onPrimary else c.textSecondary,
+                )
+            }
+        }
+    }
+
+    // 实时回显：让用户能把"这个日期"和"第 1 周是哪几天"对上
+    Spacer(Modifier.height(10.dp))
+    val parsed = runCatching { LocalDate.parse(mondayText.trim()) }.getOrNull()
+    val ok = parsed?.dayOfWeek == DayOfWeek.MONDAY
+    Text(
+        when {
+            parsed == null -> "填写日期后，这里会显示推算出的第 1 周区间。"
+            ok -> "第 1 周：${rangeLabel(parsed)}；" +
+                "改动只影响「第几周 ↔ 哪几天」的换算，已排好的课不会丢。"
+            else -> "$parsed 是「${DAY_NAMES[parsed.dayOfWeek.value]}」，不是周一。" +
+                "起点有误会使整张课表的日期整体偏移，且界面不显示任何异常。"
+        },
+        style = t.caption,
+        color = if (parsed != null && !ok) c.danger else c.textTertiary,
+    )
 }
 
 /**

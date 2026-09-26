@@ -1,7 +1,7 @@
 <!--
   自适应图标前景：两层对勾。
 
-  构图：白色底 + 两个错位对勾。后层用浅绿充当投影，前层用东大绿标准色。
+  构图：白色底 + 两个错位对勾。后层用浅蓝充当投影，前层用长大蓝（#133984）。
   画布 108x108，可见区域为中心 72x72，安全区 66x66（即 21..87），
   全部笔画落在以画布中心为心、半径 36 的圆内，圆形、圆角方形、水滴形遮罩均不裁切。
 
@@ -19,19 +19,19 @@
     android:viewportWidth="108"
     android:viewportHeight="108">
 
-    <!-- 后层：浅绿，向左上偏移 -->
+    <!-- 后层：浅蓝（前层色冲淡到贴近白底），向左上偏移 -->
     <path
         android:pathData="M28,50.5 L43,65.5 L71.5,30"
-        android:strokeColor="#AECB95"
+        android:strokeColor="#ACBAD4"
         android:strokeWidth="12"
         android:strokeLineCap="butt"
         android:strokeLineJoin="miter"
         android:fillColor="#00000000" />
 
-    <!-- 前层：东大绿标准色 #4C7D2C -->
+    <!-- 前层：长大蓝 #133984（长安大学官网现行主色，全站 CSS 中占比最高） -->
     <path
         android:pathData="M36,59.5 L51,74.5 L79.5,39"
-        android:strokeColor="#4C7D2C"
+        android:strokeColor="#133984"
         android:strokeWidth="12"
         android:strokeLineCap="butt"
         android:strokeLineJoin="miter"

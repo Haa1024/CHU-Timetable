@@ -103,7 +103,7 @@ private data class BlockDraft(
  *   手动同步以教务为准」。这是必要的告知，而非限制。
  *
  * 关于本地信息（颜色 / 学分 / 备注）：其与会务无关，
- *   手动同步时按课程配对保留（见 `TimetableRepository.syncFromEhall`），
+ *   手动同步时按课程配对保留（见 `TimetableRepository.syncFromServer`），
  *   故此处可放心交由用户修改。
  *
  * @param existing null 表示新增
